@@ -12,7 +12,7 @@ DB_FILE = 'user_teams.json'
 # OpenAI API 클라이언트 설정
 # Render의 Environment(환경변수)에 OPENAI_API_KEY를 등록하거나, 
 # 테스트용이라면 직접 "sk-..." 키 값을 입력해도 됩니다.
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.environ.get("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"))
 
 def load_data():
     if os.path.exists(DB_FILE):
