@@ -107,7 +107,7 @@ def show_match():
 def show_ranking():
     try:
         # 1. 네이버 스포츠 실제 KBO 순위 데이터 가져오기 (실시간 반영)
-        url = "https://sports.news.naver.com/kbaseball/v1/record/team?year=2026"
+        url = "https://m.sports.naver.com/kbaseball/record/kbo?seasonCode=2026&tab=teamRank"
         response = requests.get(url)
         raw_data = response.json()
         
