@@ -89,9 +89,9 @@ def show_match():
 @app.route('/show-ranking', methods=['POST'])
 def show_ranking():
     try:
-        # 네이버 스포츠 실제 KBO 순위 데이터 가져오기 (실시간 반영)
+        # 네이버 스포츠 실제 KBO 순위 데이터 가져오기 (실시간 반영, 3초 타임아웃 제한 설정)
         url = "https://sports.news.naver.com/kbaseball/v1/record/team?year=2026"
-        response = requests.get(url)
+        response = requests.get(url, timeout=3)
         raw_data = response.json()
         
         regular_team_record = raw_data.get('regularTeamRecordList', [])
@@ -108,7 +108,7 @@ def show_ranking():
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        # 외부 API 장애나 오류 발생 시 예외 처리 안전장치
+        # 외부 API 장애나 5초 이내 타임아웃 발생 시 안전하게 튕겨내기
         final_ranking_text = "⚠️ 현재 실시간 야구 순위 데이터를 가져오는 데 실패했습니다. 잠시 후 다시 시도해 주세요!"
 
     response_body = {
