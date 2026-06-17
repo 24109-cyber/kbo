@@ -1,14 +1,12 @@
 from flask import Flask, request, jsonify
 import json
 import os
-from openai import OpenAI  # 지피티 연동 필수
+import requests
+from bs4 import BeautifulSoup  # 👈 크롤링을 위한 뷰티풀수프 라이브러리 추가
 
 app = Flask(__name__)
 
 DB_FILE = 'user_teams.json'
-
-# 🔑 Render Environment Variables에 등록한 OpenAI 키를 가져옵니다.
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 def load_data():
     if os.path.exists(DB_FILE):
@@ -37,7 +35,7 @@ def register_team():
     response_body = {
         "version": "2.0",
         "template": {
-            "outputs": [{"simpleText": {"text": f"🎉 {selected_team} 등록이 완료되었습니다!\n이제 지피티가 {selected_team}의 최신 상태를 검색해 드릴게요."}}]
+            "outputs": [{"simpleText": {"text": f"🎉 {selected_team} 등록이 완료되었습니다!\n앞으로 {selected_team}의 경기 정보와 실시간 순위를 알려드릴게요."}}]
         }
     }
     return jsonify(response_body)
@@ -62,66 +60,67 @@ def show_match():
 
 
 # -------------------------------------------------------------
-# [스킬 3] 현재 순위 조회 주소 (/show-ranking)
+# ⚾ [스킬 3] 다음 스포츠 HTML 크롤링 기반 실시간 순위 (/show-ranking)
 # -------------------------------------------------------------
 @app.route('/show-ranking', methods=['POST'])
 def show_ranking():
-    # 간단하게 고정 텍스트나 기본 뼈대로 보여주는 기존 코드 유지
-    ranking_text = "🏆 2026 KBO 프로야구 현재 순위\n-------------------------\n(실시간 순위 메뉴 혹은 네이버 스포츠에서 확인 가능합니다!)"
-    return jsonify({"version": "2.0", "template": {"outputs": [{"simpleText": {"text": ranking_text}}]}})
-
-
-# -------------------------------------------------------------
-# ✨ [스킬 4] 지피티한테 "인터넷 뒤져서 팀 전망 알려줘" 프롬프트 짬처리 (/team-analysis)
-# -------------------------------------------------------------
-@app.route('/team-analysis', methods=['POST'])
-def team_analysis():
-    req = request.get_json()
-    user_id = req['userRequest']['user']['id']
-    
-    user_data = load_data()
-    my_team = user_data.get(user_id)
-    
-    if not my_team:
-        return jsonify({
-            "version": "2.0",
-            "template": {
-                "outputs": [{"simpleText": {"text": "응원 팀을 먼저 등록하셔야 지피티 검색 분석을 요청할 수 있어요! 🧐"}}]
-            }
-        })
-        
     try:
-        # 💬 네가 원한 바로 그 느낌! 지피티한테 "야구 뉴스랑 순위 직접 검색해서 알려줘"라고 프롬프트 때려박기
-        # model은 최신 인터넷 검색 기능(Web Search) 연동이 유연한 gpt-4o 또는 gpt-4o-mini를 사용합니다.
-        gpt_response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "너는 최신 인터넷 검색 기능을 가진 AI 야구 해설위원이야. 사용자가 요청한 팀의 '가장 최신 KBO 뉴스, 현재 순위 분위기, 최근 경기 흐름'을 인터넷에서 직접 찾아서 파악한 뒤 브리핑해 줘야 해. 절대 옛날 정보나 거짓말을 지어내지 말고, 최근 2026 시즌 뉴스 기반으로 냉철하고 유쾌하게 분석해 줘. 답변은 카톡 말풍선 크기에 맞게 이모티콘을 섞어 3~4줄로 콤팩트하게 요약해 줄 것!"
-                },
-                {
-                    "role": "user", 
-                    "content": f"요즘 프로야구 {my_team} 팀 상태랑 앞으로의 시즌 전망 인터넷에서 최신 정보로 찾아서 핵심만 알려줘."
-                }
-            ],
-            max_tokens=400
-        )
-        analysis_result = gpt_response.choices[0].message.content
+        # 1. 다음 스포츠 KBO 순위 페이지 HTML 가져오기 (타임아웃 3초 설정)
+        url = "https://sports.daum.net/record/KBO"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=3)
+        
+        # 2. BeautifulSoup으로 HTML 파싱하기
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 다음 순위 테이블의 tbody 안의 tr 태그들을 한 줄씩 찾습니다.
+        # 다음 스포츠의 전통적인 순위 테이블 클래스 구조를 타겟팅합니다.
+        table_rows = soup.select('.table_record tbody tr')
+        
+        # 만약 클래스명이 변경되었을 경우를 대비한 2차 백업 타겟팅
+        if not table_rows:
+            table_rows = soup.select('table tbody tr')
+
+        ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
+        
+        # 3. HTML 내부에서 팀 이름, 순위, 승률 텍스트 쏙쏙 뽑아내기
+        count = 0
+        for row in table_rows:
+            # 팀명이 들어있는 태그와 승률이 들어있는 태그 추출
+            team_tag = row.select_one('.txt_team') or row.select_one('.team')
+            win_rate_tag = row.select_one('.td_pct') or row.select_one('td:nth-of-type(7)') # 보통 7번째 칸이 승률
+            
+            if team_tag:
+                count += 1
+                team_name = team_tag.text.strip()
+                # 승률 텍스트가 있으면 가져오고, 없으면 생략
+                win_rate = win_rate_tag.text.strip() if win_rate_tag else "-"
+                
+                ranking_list.append(f"{count}위: {team_name} (승률: {win_rate})")
+            
+            # 10개 구단 다 가져오면 멈춤
+            if count == 10:
+                break
+                
+        ranking_list.append("-------------------------")
+        ranking_list.append("※ 다음 스포츠(Daum) 실시간 크롤링 연동 완료")
+        
+        # 만약 크롤링 결과가 빈 값이라면 예외 처리로 넘김
+        if count == 0:
+            raise Exception("데이터 파싱 실패")
+            
+        final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        analysis_result = f"⚠️ 지피티가 인터넷 검색 도중 와이파이가 끊겼습니다. (에러 발생)\n\n잠시 후 다시 시도해 주세요!"
+        # 웹 페이지 구조가 예고 없이 바뀌거나 인터넷 에러가 났을 때 작동하는 안전장치
+        final_ranking_text = "⚠️ 다음 스포츠 페이지 구조 변경 또는 서버 지연으로 인해 실시간 순위를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요!"
 
     response_body = {
         "version": "2.0",
         "template": {
-            "outputs": [
-                {
-                    "simpleText": {
-                        "text": f"🤖 지피티가 실시간 뉴스를 검색한 결과!\n\n{analysis_result}"
-                    }
-                }
-            ]
+            "outputs": [{"simpleText": {"text": final_ranking_text}}]
         }
     }
     return jsonify(response_body)
