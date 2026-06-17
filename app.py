@@ -60,61 +60,57 @@ def show_match():
 
 
 # -------------------------------------------------------------
-# ⚾ [스킬 3] 다음 스포츠 HTML 크롤링 기반 실시간 순위 (/show-ranking)
+# ⚾ [스킬 3] 다음 스포츠 HTML 맞춤형 실시간 순위 (/show-ranking)
 # -------------------------------------------------------------
 @app.route('/show-ranking', methods=['POST'])
 def show_ranking():
     try:
-        # 1. 다음 스포츠 KBO 순위 페이지 HTML 가져오기 (타임아웃 3초 설정)
+        # 1. 다음 스포츠 KBO 순위 페이지 HTML 가져오기
         url = "https://sports.daum.net/record/KBO"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         response = requests.get(url, headers=headers, timeout=3)
-        
-        # 2. BeautifulSoup으로 HTML 파싱하기
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 다음 순위 테이블의 tbody 안의 tr 태그들을 한 줄씩 찾습니다.
-        # 다음 스포츠의 전통적인 순위 테이블 클래스 구조를 타겟팅합니다.
-        table_rows = soup.select('.table_record tbody tr')
-        
-        # 만약 클래스명이 변경되었을 경우를 대비한 2차 백업 타겟팅
-        if not table_rows:
-            table_rows = soup.select('table tbody tr')
+        # 2. 제공된 HTML 구조 분석 기반 타겟팅
+        # '종합 순위' 타이틀 바로 아래에 있는 첫 번째 tbl_record 테이블의 tbody 행들을 가져옵니다.
+        table_rows = soup.select('.record_kbo .tbl_record tbody tr')
 
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
         
-        # 3. HTML 내부에서 팀 이름, 순위, 승률 텍스트 쏙쏙 뽑아내기
         count = 0
         for row in table_rows:
-            # 팀명이 들어있는 태그와 승률이 들어있는 태그 추출
-            team_tag = row.select_one('.txt_team') or row.select_one('.team')
-            win_rate_tag = row.select_one('.td_pct') or row.select_one('td:nth-of-type(7)') # 보통 7번째 칸이 승률
+            # 순위 텍스트 추출 (.td_rank)
+            rank_tag = row.select_one('.td_rank')
+            # 팀 이름 텍스트 추출 (.txt_name)
+            team_tag = row.select_one('.txt_name')
+            # 승률 데이터 추출 (data-field="rank" 속성을 가진 td 태그)
+            win_rate_tag = row.select_one('td[data-field="rank"]')
             
-            if team_tag:
+            if team_tag and rank_tag:
                 count += 1
-                team_name = team_tag.text.strip()
-                # 승률 텍스트가 있으면 가져오고, 없으면 생략
+                rank = rank_tag.text.strip()
+                
+                # 팀 이름 뒤에 붙는 불필요한 태그/공백 제거
+                team_name = team_tag.get_text().strip()
+                
                 win_rate = win_rate_tag.text.strip() if win_rate_tag else "-"
                 
-                ranking_list.append(f"{count}위: {team_name} (승률: {win_rate})")
+                ranking_list.append(f"{rank}위: {team_name} (승률: {win_rate})")
             
-            # 10개 구단 다 가져오면 멈춤
             if count == 10:
                 break
                 
         ranking_list.append("-------------------------")
-        ranking_list.append("※ 다음 스포츠(Daum) 실시간 크롤링 연동 완료")
+        ranking_list.append("※ 다음 스포츠(Daum) 실시간 크롤링 완료")
         
-        # 만약 크롤링 결과가 빈 값이라면 예외 처리로 넘김
         if count == 0:
             raise Exception("데이터 파싱 실패")
             
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        # 웹 페이지 구조가 예고 없이 바뀌거나 인터넷 에러가 났을 때 작동하는 안전장치
         final_ranking_text = "⚠️ 다음 스포츠 페이지 구조 변경 또는 서버 지연으로 인해 실시간 순위를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요!"
 
     response_body = {
@@ -124,8 +120,3 @@ def show_ranking():
         }
     }
     return jsonify(response_body)
-
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
