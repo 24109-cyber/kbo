@@ -120,3 +120,101 @@ def show_ranking():
         }
     }
     return jsonify(response_body)
+
+import datetime
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask, jsonify, request
+
+app = Flask(__name__)
+
+
+def get_today_kbo_games():
+    # 1. 오늘 날짜를 YYYYMMDD 형식으로 구하기 (예: 20260618)
+    today_str = datetime.datetime.now().strftime("%Y%m%d")
+
+    # 2. 다음 스포츠 KBO 일정 URL (날짜 파라미터 동적 추가)
+    url = f"https://sports.daum.net/schedule/kbo?date={today_str}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return "경기 일정을 불러올 수 없습니다. (응답 에러)"
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # 오늘 날짜(data-date)에 맞는 li 태그들을 모두 찾음
+        game_list = soup.find_all("li", {"data-date": today_str})
+
+        if not game_list:
+            return f"📅 {today_str[:4]}-{today_str[4:6]}-{today_str[6:]}\n오늘 예정된 KBO 경기가 없습니다."
+
+        result_text = f"📅 오늘의 KBO 경기 및 선발투수\n\n"
+
+        for game in game_list:
+            # 경기 시간 추출
+            time_tag = game.find("span", class_="info_time")
+            game_time = time_tag.text.strip() if time_tag else "18:30"
+
+            # 왼쪽 팀 (원정) 정보 추출
+            team_left_box = game.find("span", class_="team_left")
+            team_left_name = (
+                team_left_box.find("strong", class_="tit_team").text.strip()
+            )
+            # 선발 투수 이름 (txt_team 클래스)
+            pitcher_left_tag = team_left_box.find("span", class_="txt_team")
+            pitcher_left = (
+                pitcher_left_tag.text.strip() if pitcher_left_tag else "미정"
+            )
+
+            # 오른쪽 팀 (홈) 정보 추출
+            team_right_box = game.find("span", class_="team_right")
+            # 홈그라운드 아이콘 텍스트를 지우고 순수 팀 이름만 추출
+            team_right_strong = team_right_box.find("strong", class_="tit_team")
+            if team_right_strong.find("span", class_="ico_home"):
+                # "홈그라운드" 글자 제외하고 가져오기
+                team_right_name = (
+                    team_right_strong.text.replace("홈그라운드", "").strip()
+                )
+            else:
+                team_right_name = team_right_strong.text.strip()
+
+            pitcher_right_tag = team_right_box.find("span", class_="txt_team")
+            pitcher_right = (
+                pitcher_right_tag.text.strip() if pitcher_right_tag else "미정"
+            )
+
+            # 한 경기의 텍스트 포맷 완성
+            result_text += f"⏰ {game_time}\n"
+            result_text += f"⚾ {team_left_name} ({pitcher_left}) vs {team_right_name} ({pitcher_right})\n"
+            result_text += f"-------------------------\n"
+
+        return result_text.strip()
+
+    except Exception as e:
+        return f"크롤링 중 에러가 발생했습니다: {str(e)}"
+
+
+# 카카오톡 챗봇이 '오늘 경기 조회' 버튼을 눌렀을 때 호출할 API 라우트
+@app.route("/api/today-games", methods=["POST"])
+def today_games_endpoint():
+    # 크롤링 함수 호출해서 텍스트 받아오기
+    games_info = get_today_kbo_games()
+
+    # 카카오톡 스킬 응답 JSON 규격에 맞게 반환
+    response_body = {
+        "version": "2.0",
+        "template": {
+            "outputs": [{"simpleText": {"text": games_info}}],
+            "quickReplies": [],  # 필요시 하단 알맹이 버튼 추가
+        },
+    }
+    return jsonify(response_body)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
