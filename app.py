@@ -10,15 +10,21 @@ app = Flask(__name__)
 
 DB_FILE = "user_teams.json"
 
-# Render 환경 변수(OPEN_API_KEY) 연동
-OPENAI_API_KEY = os.environ.get("OPEN_API_KEY")
-client = OpenAI(api_key=OPENAI_API_KEY)
+# OpenAI 클라이언트 안전하게 선언 (Render 환경변수 OPEN_API_KEY 사용)
+OPENAI_API_KEY = os.environ.get("OPEN_API_KEY", "")
+client = None
+if OPENAI_API_KEY:
+    # 💡 에러 방지를 위해 가장 기본적이고 안전한 형태로 선언합니다.
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 def load_data():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except:
+                return {}
     return {}
 
 
@@ -42,7 +48,7 @@ def get_my_kbo_game(registered_team):
     try:
         response = requests.get(url, headers=headers, timeout=7)
         if response.status_code != 200:
-            return "경기 일정을 불러올 수 없습니다. (네이버 API 응답 실패)"
+            return "경기 일정을 불러올 수 없습니다. (포털 서버 API 응답 에러)"
 
         data = response.json()
         games = data.get("result", {}).get("games", [])
@@ -74,7 +80,7 @@ def get_my_kbo_game(registered_team):
                 result_text += f"📅 날짜: {today_str}\n"
                 result_text += f"⏰ 시간: {game_time}\n"
                 result_text += f"⚾ {display_left} ({pitcher_left}) vs {display_right} ({pitcher_right})\n\n"
-                result_text += "※ 네이버 스포츠 실시간 API 연동 성공"
+                result_text += "※ 네이버 스포츠 실시간 API 연동 완료"
                 return result_text
 
         return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
@@ -91,14 +97,23 @@ def register_team():
     req = request.get_json()
     try:
         user_id = req["userRequest"]["user"]["id"]
-        selected_team = req["action"]["clientExtra"]["team"]
+        # 블록 설정에 따라 다양한 경로로 들어올 수 있으므로 예외처리 강화
+        selected_team = None
+        if "clientExtra" in req.get("action", {}) and "team" in req["action"]["clientExtra"]:
+            selected_team = req["action"]["clientExtra"]["team"]
+        elif "params" in req.get("action", {}) and "team" in req["action"]["params"]:
+            selected_team = req["action"]["params"]["team"]
+            
+        if not selected_team:
+            raise Exception("선택된 팀 파라미터가 없습니다.")
+            
     except Exception as e:
         return jsonify({
             "version": "2.0",
             "template": {
                 "outputs": [{
                     "simpleText": {
-                        "text": f"⚠️ 팀 등록 실패 (데이터 추출 오류)\n원인: {str(e)}"
+                        "text": f"⚠️ 팀 등록 실패\n원인: {str(e)}"
                     }
                 }]
             },
@@ -173,19 +188,28 @@ def show_forecast():
             },
         })
 
+    if not client:
+        return jsonify({
+            "version": "2.0",
+            "template": {
+                "outputs": [{
+                    "simpleText": {
+                        "text": "⚠️ OpenAI API 키가 설정되지 않았거나 서버 오류입니다."
+                    }
+                }]
+            },
+        })
+
     try:
-        prompt = f"너는 대한민국 최고의 프로야구 전문가야. 2026년 KBO 리그 시즌을 기준으로 [{my_team}] 팀의 전력, 핵심 선수, 그리고 이번 시즌 최종 성적 전망에 대해 카카오톡 챗봇에 어울리는 친근하고 유쾌한 말투로 300자 내외로 핵심만 요약해서 분석해줘."
+        prompt = f"2026년 KBO 리그 시즌 기준으로 [{my_team}] 팀의 전력과 시즌 전망에 대해 친근한 야구 전문가 말투로 200자 내외 요약해줘."
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": "너는 KBO 야구 전문가 챗봇이야. 야구 팬에게 말하듯이 이모티콘을 섞어가며 친근하게 답변해줘.",
-                },
+                {"role": "system", "content": "너는 KBO 야구 전문가 챗봇이야. 친근하게 답변해줘."},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=500,
+            max_tokens=300,
             temperature=0.7,
         )
 
@@ -193,9 +217,7 @@ def show_forecast():
         forecast_text = f"🔮 GPT 야구 전문가가 분석한 [{my_team}]의 전망\n\n{gpt_answer}"
 
     except Exception as e:
-        forecast_text = (
-            f"⚠️ GPT 서버와 연결하는 중 오류가 발생했습니다.\n오류 내용: {str(e)}"
-        )
+        forecast_text = f"⚠️ GPT 전망 분석 실패: {str(e)}"
 
     return jsonify({
         "version": "2.0",
@@ -217,30 +239,29 @@ def show_ranking():
         response = requests.get(url, headers=headers, timeout=7)
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # 네이버 리액트 동적 클래스 구조 완벽 대응 파싱
+        # 네이버 리액트 동적 클래스 li 태그 전체 검색
         rows = soup.select("ol[class*='TableBody_list'] li")
 
         if not rows:
-            raise Exception("HTML 순위 데이터를 찾을 수 없습니다.")
+            raise Exception("순위 데이터 영역(HTML 구조)을 찾지 못했습니다.")
 
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
 
         for row in rows:
             rank_tag = row.select_one("em[class*='TeamInfo_ranking']")
             team_tag = row.select_one("div[class*='TeamInfo_team_name']")
-            # 승률 텍스트가 들어있는 클래스 타격
-            win_rate_tag = row.select_one("div[class*='TextInfo_highlight']")
+            
+            # 💡 [핵심 보완] 특정 클래스 대신 wra(승률) blind 태그의 부모를 추적하여 파싱 에러 방지
+            win_rate = "-"
+            wra_blind = row.find("span", text="wra") or row.find("span", class_="blind", string="wra")
+            if wra_blind:
+                parent_div = wra_blind.find_parent("div")
+                if parent_div:
+                    win_rate = parent_div.get_text().replace("wra", "").strip()
 
             if rank_tag and team_tag:
                 rank = rank_tag.get_text().replace("위", "").strip()
                 team_name = team_tag.get_text().strip()
-                # 'wra' 같은 blind 안내 텍스트가 붙어있으면 제거하고 숫자만 추출
-                win_rate = (
-                    win_rate_tag.get_text().replace("wra", "").strip()
-                    if win_rate_tag
-                    else "-"
-                )
-
                 ranking_list.append(f"{rank}위: {team_name} (승률: {win_rate})")
 
         ranking_list.append("-------------------------")
@@ -248,9 +269,7 @@ def show_ranking():
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        final_ranking_text = (
-            f"⚠️ 실시간 순위를 가져오는 중 오류가 발생했습니다.\n오류 내용: {str(e)}"
-        )
+        final_ranking_text = f"⚠️ 실시간 순위 데이터 파싱 실패\n원인: {str(e)}"
 
     return jsonify({
         "version": "2.0",
@@ -259,4 +278,4 @@ def show_ranking():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
