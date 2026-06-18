@@ -33,15 +33,15 @@ def save_data(data):
 
 
 # -------------------------------------------------------------
-# ⚾ [크롤링 보완] 네이버 스포츠 KBO 일정 페이지 HTML 직접 파싱
+# ⚾ [정밀 스크래핑] 네이버 스포츠 KBO 일정 페이지 HTML 직접 조준 파싱
 # -------------------------------------------------------------
 def get_my_kbo_game(registered_team):
     # 한국 시간(KST) 구하기
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    today_str = kst_now.strftime("%Y%m%d")  # URL 파라미터용 (예: 20260619)
+    today_str = kst_now.strftime("%Y%m%d")  # 20260619 형식
     today_display = kst_now.strftime("%Y-%m-%d")
 
-    # 💡 네이버 야구 일정 페이지 웹뷰 URL 직접 긁기
+    # 네이버 야구 일정 페이지 PC 버전 URL
     url = f"https://sports.news.naver.com/kbaseball/schedule/index?date={today_str}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -50,97 +50,93 @@ def get_my_kbo_game(registered_team):
     try:
         response = requests.get(url, headers=headers, timeout=7)
         if response.status_code != 200:
-            return "경기 일정을 불러올 수 없습니다. (네이버 웹 접속 실패)"
+            return "경기 일정을 불러올 수 없습니다. (네이버 접속 실패)"
 
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # 💡 [보완 핵심] 제공해준 스크린샷 돔 구조 기반 분석
-        # 각 경기들이 배치된 li 태그 또는 MatchBox 영역을 타격합니다.
-        match_boxes = soup.select("ul.content_schedule_list li") or soup.select("[class*='MatchBox_match_item']")
+        # 💡 [핵심] 네이버 일정 테이블에서 오늘 경기 행(li)들을 전부 수집
+        # 제공된 스크린샷 구조의 클래스 리스트 타격
+        match_rows = soup.select("ul.content_schedule_list li") or soup.select("[class*='MatchBox_match_item']")
         
-        if not match_boxes:
-            # 대안 셀렉터 (네이버 야구 일정 메인 타격)
-            match_boxes = soup.select("#calendarBody tr") or soup.select(".sch_tb tr")
+        # 만약 리액트 컴포넌트 내부 클래스가 숨겨져 있을 경우, 메인 캘린더 바디 타격
+        if not match_rows:
+            match_rows = soup.select("#calendarBody tr") or soup.select(".sch_tb tr")
 
         search_team = registered_team.replace(" ", "").strip()
-        
-        # 만약 웹 크롤링 셀렉터가 네이버 개편으로 막힐 경우를 대비한 2차 백업 (오늘 일정 데이터 확보용)
-        # 현재 화면에 노출된 텍스트 구조로 유연하게 파싱 진행
-        found_match = False
-        result_text = ""
 
-        # 네이버 스케줄 텍스트 파싱 처리
-        for box in match_boxes:
-            box_text = box.get_text()
-            if search_team in box_text:
-                # 텍스트 예시: "18:30 예정 KIA 네일 KT 오원석 전력 분석 응원"
-                # 공백 기준으로 나누어 팀명과 선발 선수 추출
-                tokens = [t.strip() for t in box_text.split() if t.strip()]
+        for row in match_rows:
+            row_text = row.get_text()
+            
+            # 내가 등록한 팀이 이 경기 행에 포함되어 있다면!
+            if search_team in row_text.replace(" ", ""):
                 
-                # 캡처 화면 매칭 로직 처리
-                # 예: ['18:30', '예정', '롯데', '이민석', 'VS', '키움', '알칸타라'] 형태 분석
-                if len(tokens) >= 4:
-                    time_str = tokens[0] if ":" in tokens[0] else "18:30"
-                    
-                    # 롯데 이민석 키움 알칸타라 처럼 순서대로 배치된 토큰 매칭
-                    try:
-                        # 유동적인 배열 길이에 따른 매칭 예외 처리
-                        team_a = "원정팀"
-                        pitcher_a = "선발 미정"
-                        team_b = "홈팀"
-                        pitcher_b = "선발 미정"
-                        
-                        # 내 팀이 포함된 매치업의 토큰을 순차 탐색
-                        for i, token in enumerate(tokens):
-                            if token == search_team or search_team in token:
-                                # 대략적인 위치 기반으로 주변 텍스트(선발투수) 추출
-                                if i > 0 and tokens[i-1] in ["예정", "종료", "VS"]:
-                                    pass
-                        
-                        # 캡처본 돔트리 크롤러 정밀 조준
-                        left_team_tag = box.select_one(".team_left, [class*='MatchBox_team_item']")
-                        # 텍스트 내부 완전 스캔 기법 도입
-                        result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
-                        result_text += f"📅 날짜: {today_display}\n"
-                        result_text += f"⏰ 시간: {time_str}\n"
-                        
-                        # 캡처 스크린샷 텍스트 그대로 가공해서 출력
-                        clean_text = box_text.replace("전력", "").replace("분석", "").replace("응원", "").replace("예정", "").strip()
-                        result_text += f"⚾ {clean_text}\n\n"
-                        result_text += "※ 네이버 스포츠 실시간 파싱 완료"
-                        return result_text
-                    except:
-                        pass
+                # 1. 경기 시간 파싱 (보통 맨 앞에 18:30 등으로 배치됨)
+                time_str = "18:30"
+                for token in row_text.split():
+                    if ":" in token and len(token) <= 5:
+                        time_str = token
+                        break
 
-        # 백업용 API 스크립트 연동 (만약 위 크롤러가 실패하면 동작)
-        api_url = f"https://api-gw.sports.naver.com/schedule/games?upperCategoryId=kbaseball&date={today_display}"
-        api_res = requests.get(api_url, headers=headers, timeout=5)
-        if api_res.status_code == 200:
-            api_data = api_res.json()
-            games = api_data.get("result", {}).get("games", [])
-            for game in games:
-                t_left = game.get("awayTeamName", "")
-                t_right = game.get("homeTeamName", "")
-                if (search_team in t_left) or (search_team in t_right):
-                    # API에서는 투수 명이 다르게 들어올 수 있으므로 체크 후 강제 대입
-                    p_left = game.get("awayPitcherName") or game.get("pitcherNameLeft") or "선발투수 발표전"
-                    p_right = game.get("homePitcherName") or game.get("pitcherNameRight") or "선발투수 발표전"
-                    
-                    # 💡 공백이거나 '미정' 문자열 필터링
-                    if not p_left.strip() or p_left == "미정": p_left = "선발 미정"
-                    if not p_right.strip() or p_right == "미정": p_right = "선발 미정"
+                # 2. 좌측/우측 팀 정보 및 선발 투수 텍스트 추출 정밀화
+                # 클래스 난수를 회피하기 위해 span 및 div 내부 텍스트 노드를 스캔
+                teams_and_pitchers = []
+                
+                # 팀명과 투수명이 묶여있는 태그나 일반 텍스트 내에서 이름 쌍 찾기
+                # 스크린샷 구조: [KIA 네일], [KT 오원석], [삼성 후라도], [한화 박준영]
+                # row 내부의 텍스트 노드 중 2글자(팀명) + 이름(투수명) 조합을 정규 필터링
+                words = [w.strip() for w in row_text.split() if w.strip()]
+                
+                # '예정', '전력', '분석', '응원', 'VS', 'V', 'S', time_str 제거하여 순수 데이터만 추출
+                clean_words = []
+                for w in words:
+                    if w in ["예정", "종료", "전력", "분석", "응원", "VS", "경기", "취소", time_str]:
+                        continue
+                    # 💡 홈/원정 표시 글자 떼기
+                    w_clean = w.replace("홈", "").strip()
+                    if w_clean:
+                        clean_words.append(w_clean)
 
-                    result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
-                    result_text += f"📅 날짜: {today_display}\n"
-                    result_text += f"⏰ 시간: {game.get('gameDateTime','')[11:16] if 'T' in game.get('gameDateTime','') else '18:30'}\n"
-                    result_text += f"⚾ {t_left}({p_left}) vs {t_right}({p_right})\n\n"
-                    result_text += "※ 네이버 실시간 데이터 동기화 완료"
-                    return result_text
+                # clean_words 예시: ['롯데', '이민석', '키움', '알칸타라'] 또는 ['삼성', '후라도', '한화', '박준영']
+                if len(clean_words) >= 4:
+                    away_team = clean_words[0]
+                    away_pitcher = clean_words[1]
+                    home_team = clean_words[2]
+                    home_pitcher = clean_words[3]
+                else:
+                    # 토큰 분리가 불 명확할 경우 텍스트 영역 직접 파싱 시도 (백업 가공)
+                    # 텍스트 전체에서 선발 투수 명이 매칭되도록 강제 설정
+                    away_team = "원정"
+                    away_pitcher = "선발 미정"
+                    home_team = "홈"
+                    home_pitcher = "선발 미정"
+                    
+                    # 수동 파싱 보완
+                    all_spans = [s.get_text().strip() for s in row.select("span") if s.get_text().strip()]
+                    if len(all_spans) >= 4:
+                        away_team, away_pitcher, home_team, home_pitcher = TensorMatch(all_spans)
+
+                # 최종 문자열 조립
+                result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
+                result_text += f"📅 날짜: {today_display}\n"
+                result_text += f"⏰ 시간: {time_str}\n"
+                result_text += f"⚾ {away_team}({away_pitcher}) vs {home_team}({home_pitcher})\n\n"
+                result_text += "※ 네이버 스포츠 화면 스크래핑 성공"
+                return result_text
 
         return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
 
     except Exception as e:
-        return f"경기 정보 처리 중 에러 발생: {str(e)}"
+        return f"경기 정보 파싱 오류 발생: {str(e)}"
+
+def TensorMatch(span_list):
+    # 유용 텍스트 추출 헬퍼 함수
+    res = []
+    for s in span_list:
+        if s not in ["예정","전력","분석","응원","VS","","홈"]:
+            res.append(s)
+    if len(res) >= 4:
+        return res[0], res[1], res[2], res[3]
+    return "원정", "선발 미정", "홈", "선발 미정"
 
 
 # -------------------------------------------------------------
@@ -152,7 +148,6 @@ def register_team():
     try:
         user_id = req["userRequest"]["user"]["id"]
         
-        # 카카오톡 파라미터 다중 경로 완전 방어
         selected_team = None
         if "clientExtra" in req.get("action", {}) and "team" in req["action"]["clientExtra"]:
             selected_team = req["action"]["clientExtra"]["team"]
@@ -162,12 +157,12 @@ def register_team():
             selected_team = req["action"]["detailParams"]["team"]["value"]
             
         if not selected_team:
-            raise Exception("팀 파라미터 매칭 실패")
+            raise Exception("팀 파라미터가 비어있습니다.")
             
     except Exception as e:
         return jsonify({
             "version": "2.0",
-            "template": {"outputs": [{"simpleText": {"text": f"⚠️ 팀 등록 실패. 카카오톡 봇 설정을 확인해 주세요.\n(원인: {str(e)})"}}]}
+            "template": {"outputs": [{"simpleText": {"text": f"⚠️ 팀 등록 실패\n원인: {str(e)}"}}]}
         })
 
     user_data = load_data()
@@ -179,7 +174,7 @@ def register_team():
         "template": {
             "outputs": [{
                 "simpleText": {
-                    "text": f"🎉 {selected_team} 등록이 완료되었습니다!\n앞으로 실시간 경기 정보와 순위를 안내해 드릴게요."
+                    "text": f"🎉 {selected_team} 등록 완료!\n실시간 순위와 매치 정보를 확인해보세요."
                 }
             }]
         },
@@ -230,7 +225,7 @@ def show_forecast():
     if not client:
         return jsonify({
             "version": "2.0",
-            "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 인증 키를 확인해 주세요."}}]}
+            "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않았습니다."}}]}
         })
 
     try:
@@ -269,7 +264,6 @@ def show_ranking():
         response = requests.get(url, headers=headers, timeout=7)
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # 네이버 동적 리액트 클래스 구조 안전 스캔
         rows = soup.select("ol[class*='TableBody_list'] li")
 
         if not rows:
@@ -295,7 +289,7 @@ def show_ranking():
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        final_ranking_text = f"⚠️ 실시간 순위를 가져오는 중 오류가 발생했습니다.\n오류 내용: {str(e)}"
+        final_ranking_text = f"⚠️ 실시간 순위를 가져오는 중 오류가 발생했습니다.\n원인: {str(e)}"
 
     return jsonify({
         "version": "2.0",
