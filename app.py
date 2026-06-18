@@ -26,120 +26,102 @@ def save_data(data):
 
 
 # -------------------------------------------------------------
-# ⚾ [크롤링 엔진] 다음 스포츠 KBO 실시간 선발 투수 필터링 함수
+# ⚾ [크롤링 엔진] 다음 스포츠 내부 진짜 API를 타격하는 강력한 함수
 # -------------------------------------------------------------
 def get_my_kbo_game(registered_team):
-    """다음 스포츠에서 유저가 등록한 팀의 오늘 경기 데이터만 매칭하여 크롤링"""
-
-    # 💡 [핵심 교정] 해외 서버(Render) 시간대 문제 해결!
-    # UTC 시간에 9시간을 더해서 정확한 '한국 시간(KST)'을 구합니다.
+    """다음 스포츠의 실시간 내부 데이터 서버(JSON API)를 직접 호출하여 100% 매칭"""
+    # 해외 서버 시간대 보정 (한국 시간 KST 세팅)
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    today_str = kst_now.strftime("%Y%m%d")  # 예: 20260618
-    today_dash = kst_now.strftime("%Y-%m-%d")  # 예: 2026-06-18
+    today_str = kst_now.strftime("%Y-%m-%d")  # 예: '2026-06-18'
 
-    # 다음 스포츠 일정 주소로 접근
-    url = f"https://sports.daum.net/schedule/kbo?date={today_str}"
+    # 💡 웹페이지 대신 다음 스포츠가 내부적으로 데이터를 몰래 불러오는 진짜 실시간 API 주소!
+    url = f"https://sports.daum.net/prx/hermes/api/schedule/kbo?date={today_str}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
-        # 타임아웃 7초로 연장
         response = requests.get(url, headers=headers, timeout=7)
         if response.status_code != 200:
-            return "경기 일정을 불러올 수 없습니다. (포털 서버 응답 에러)"
+            return "경기 일정을 불러올 수 없습니다. (포털 서버 API 응답 에러)"
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        # HTML 파싱 대신 훨씬 정확하고 빠른 JSON 데이터 통째로 읽기
+        data = response.json()
+        games = data.get("scheduleList", [])
 
-        # 💡 매칭 확률을 높이기 위해 data-date 형식을 YYYYMMDD와 YYYY-MM-DD 둘 다 찾습니다.
-        game_list = soup.find_all("li", {"data-date": today_str})
-        if not game_list:
-            game_list = soup.find_all("li", {"data-date": today_dash})
+        if not games:
+            return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (휴식일)"
 
-        # 만약 그래도 안 나오면 전체 li 태그 중 다음 구조를 가진 항목들을 싹 뒤집니다.
-        if not game_list:
-            game_list = soup.select(".list_schedule > li")
-
-        if not game_list:
-            return f"📅 [{today_dash}] 오늘 예정된 KBO 경기가 없습니다. (일정표 비어있음)"
-
-        # 유저 팀 풀네임(예: "KT 위즈")에서 앞 2글자(예: "KT")만 추출
+        # 사용자가 등록한 풀네임(예: "KT 위즈")에서 공백 빼고 앞 2글자(예: "KT") 추출
         short_team_name = registered_team.replace(" ", "")[:2]
 
-        for game in game_list:
-            try:
-                # 원정팀(좌측) 이름 추출
-                team_left_box = game.find("span", class_="team_left")
-                if not team_left_box:
-                    continue
-                team_left_name = (
-                    team_left_box.find("strong", class_="tit_team").text.strip()
+        for game in games:
+            team_left_name = game.get("teamName1", "").strip()  # 원정팀
+            team_right_name = game.get("teamName2", "").strip()  # 홈팀
+
+            # 내가 등록한 팀 이름 조각이 대진표에 있는지 매칭 검사
+            if (short_team_name in team_left_name) or (
+                short_team_name in team_right_name
+            ):
+                # 경기 시간 추출 및 가공 (예: "1830" -> "18:30")
+                raw_time = game.get("startTime", "1830")
+                game_time = (
+                    f"{raw_time[:2]}:{raw_time[2:4]}"
+                    if len(raw_time) >= 4
+                    else "18:30"
                 )
 
-                # 홈팀(우측) 이름 추출
-                team_right_box = game.find("span", class_="team_right")
-                if not team_right_box:
-                    continue
-                team_right_strong = team_right_box.find(
-                    "strong", class_="tit_team"
-                )
-                team_right_name = (
-                    team_right_strong.text.replace("홈그라운드", "").strip()
-                )
+                # 선발 투수 추출 (없으면 미정)
+                pitcher_left = game.get("pitcherName1", "미정").strip()
+                pitcher_right = game.get("pitcherName2", "미정").strip()
 
-                # 💡 등록한 팀이 오늘 경기를 하는지 비교 검사
-                if (short_team_name in team_left_name) or (
-                    short_team_name in team_right_name
-                ):
-                    # 경기 시간 추출
-                    time_tag = game.find("span", class_="info_time")
-                    game_time = time_tag.text.strip() if time_tag else "18:30"
+                if not pitcher_left:
+                    pitcher_left = "미정"
+                if not pitcher_right:
+                    pitcher_right = "미정"
 
-                    # 선발 투수 추출
-                    pitcher_left_tag = team_left_box.find(
-                        "span", class_="txt_team"
-                    )
-                    pitcher_left = (
-                        pitcher_left_tag.text.strip()
-                        if pitcher_left_tag
-                        else "미정"
-                    )
+                result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
+                result_text += f"📅 날짜: {today_str}\n"
+                result_text += f"⏰ 시간: {game_time}\n"
+                result_text += f"⚾ {team_left_name} ({pitcher_left}) vs {team_right_name} ({pitcher_right})\n\n"
+                result_text += "※ 다음 스포츠 실시간 API 연동 성공"
+                return result_text
 
-                    pitcher_right_tag = team_right_box.find(
-                        "span", class_="txt_team"
-                    )
-                    pitcher_right = (
-                        pitcher_right_tag.text.strip()
-                        if pitcher_right_tag
-                        else "미정"
-                    )
-
-                    result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
-                    result_text += f"📅 날짜: {today_dash}\n"
-                    result_text += f"⏰ 시간: {game_time}\n"
-                    result_text += f"⚾ {team_left_name} ({pitcher_left}) vs {team_right_name} ({pitcher_right})\n\n"
-                    result_text += "※ 다음 스포츠 실시간 데이터 반영 완료"
-                    return result_text
-            except Exception:
-                continue  # 파싱 중 에러나는 빈 칸이나 다른 리그 요소는 패스
-
-        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (휴식일이거나 일정이 종료됨)"
+        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
 
     except requests.exceptions.Timeout:
-        return "⚠️ 서버 연결 시간 초과로 경기 정보를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요!"
+        return "⚠️ 다음 스포츠 서버 연결 대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요!"
     except Exception as e:
-        return f"크롤링 중 에러가 발생했습니다: {str(e)}"
+        return f"경기 정보를 처리하는 중 에러가 발생했습니다: {str(e)}"
 
 
 # -------------------------------------------------------------
-# [스킬 1] 응원 팀 등록 주소 (/register-team)
+# [스킬 1] 응원 팀 등록 주소 (/register-team) -> 🔥 파라미터 파싱 구조 전면 수정!
 # -------------------------------------------------------------
 @app.route("/register-team", methods=["POST"])
 def register_team():
     req = request.get_json()
-    user_id = req["userRequest"]["user"]["id"]
-    selected_team = req["action"]["clientExtra"]["team"]
+
+    try:
+        user_id = req["userRequest"]["user"]["id"]
+        # 💡 [긴급 수정] clientExtra 대신 캡처 화면의 '추가 정보(params)' 규격으로 정확히 연결!
+        selected_team = req["action"]["params"]["team"]
+    except (KeyError, TypeError):
+        return jsonify(
+            {
+                "version": "2.0",
+                "template": {
+                    "outputs": [
+                        {
+                            "simpleText": {
+                                "text": "⚠️ 팀 등록 중 에러가 발생했습니다. 카카오톡 봇 설정을 확인해 주세요."
+                            }
+                        }
+                    ]
+                },
+            }
+        )
 
     user_data = load_data()
     user_data[user_id] = selected_team
@@ -187,6 +169,7 @@ def show_match():
             }
         )
 
+    # 수정된 고성능 API 크롤링 함수 호출
     match_text = get_my_kbo_game(my_team)
 
     return jsonify(
@@ -197,67 +180,69 @@ def show_match():
     )
 
 
-def get_my_kbo_game(registered_team):
-    """
-    다음 스포츠의 실제 내부 API 데이터 주소를 직접 호출하여 
-    사용자가 등록한 팀의 오늘 경기 정보(시간, 대진, 선발투수)를 100% 정확하게 가져옵니다.
-    """
-    # 1. 해외 서버 시간 고려하여 한국 표준시(KST) 날짜 구하기
-    kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    today_str = kst_now.strftime("%Y-%m-%d") # 예: '2026-06-18'
-    
-    # 💡 다음 스포츠 일정 화면이 내부적으로 데이터를 요청하는 '진짜 JSON 데이터 주소'
-    url = f"https://sports.daum.net/prx/hermes/api/schedule/kbo?date={today_str}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
+# -------------------------------------------------------------
+# [스킬 3] 다음 스포츠 HTML 맞춤형 실시간 순위 (/show-ranking)
+# -------------------------------------------------------------
+@app.route("/show-ranking", methods=["POST"])
+def show_ranking():
     try:
+        url = "https://sports.daum.net/record/KBO"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         response = requests.get(url, headers=headers, timeout=7)
-        if response.status_code != 200:
-            return "경기 일정을 불러올 수 없습니다. (포털 서버 응답 에러)"
-            
-        data = response.json() # HTML이 아니라 JSON 데이터로 바로 변환!
-        
-        # 오늘 날짜에 잡힌 경기 목록 추출
-        games = data.get("scheduleList", [])
-        if not games:
-            return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (휴식일)"
-            
-        # 사용자가 고른 팀 이름에서 앞 2글자만 추출 (예: "KT 위즈" -> "KT")
-        short_team_name = registered_team.replace(" ", "")[:2]
-        
-        for game in games:
-            # 원정팀(팀1), 홈팀(팀2) 이름 확인
-            team_left_name = game.get("teamName1", "").strip()
-            team_right_name = game.get("teamName2", "").strip()
-            
-            # 💡 내가 응원하는 팀이 이 경기에 포함되어 있는지 확인
-            if (short_team_name in team_left_name) or (short_team_name in team_right_name):
-                # 경기 시간 (HH:MM 형식)
-                game_time = game.get("startTime", "18:30")
-                if len(game_time) >= 4:
-                    game_time = f"{game_time[:2]}:{game_time[2:4]}"
-                
-                # 선발 투수 정보 추출
-                pitcher_left = game.get("pitcherName1", "미정").strip()
-                pitcher_right = game.get("pitcherName2", "미정").strip()
-                
-                if not pitcher_left: pitcher_left = "미정"
-                if not pitcher_right: pitcher_right = "미정"
-                
-                result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
-                result_text += f"📅 날짜: {today_str}\n"
-                result_text += f"⏰ 시간: {game_time}\n"
-                result_text += f"⚾ {team_left_name} ({pitcher_left}) vs {team_right_name} ({pitcher_right})\n\n"
-                result_text += "※ 다음 스포츠 실시간 데이터 반영 완료"
-                return result_text
-                
-        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
-        
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        table_rows = soup.select(".record_kbo .tbl_record tbody tr")
+        ranking_list = [
+            "🏆 2026 KBO 프로야구 실시간 순위",
+            "-------------------------",
+        ]
+
+        count = 0
+        for row in table_rows:
+            rank_tag = row.select_one(".td_rank")
+            team_tag = row.select_one(".txt_name")
+            win_rate_tag = row.select_one('td[data-field="rank"]')
+
+            if team_tag and rank_tag:
+                count += 1
+                rank = rank_tag.text.strip()
+                team_name = team_tag.get_text().strip()
+                win_rate = (
+                    win_rate_tag.text.strip() if win_rate_tag else "-"
+                )
+
+                ranking_list.append(
+                    f"{rank}위: {team_name} (승률: {win_rate})"
+                )
+
+            if count == 10:
+                break
+
+        ranking_list.append("-------------------------")
+        ranking_list.append("※ 다음 스포츠(Daum) 실시간 크롤링 완료")
+
+        if count == 0:
+            raise Exception("데이터 파싱 실패")
+
+        final_ranking_text = "\n".join(ranking_list)
+
     except requests.exceptions.Timeout:
-        return "⚠️ 서버 연결 시간 초과로 경기 정보를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요!"
+        final_ranking_text = "⚠️ 다음 스포츠 서버의 응답이 너무 늦어 순위를 가져오지 못했습니다. 대기 시간을 늘렸으니 잠시 후 다시 시도해 주세요!"
     except Exception as e:
-        return f"데이터를 처리하는 중 에러가 발생했습니다: {str(e)}"
+        final_ranking_text = (
+            f"⚠️ 실시간 순위를 가져오는 중 오류가 발생했습니다.\n오류 내용: {str(e)}"
+        )
+
+    response_body = {
+        "version": "2.0",
+        "template": {
+            "outputs": [{"simpleText": {"text": final_ranking_text}}]
+        },
+    }
+    return jsonify(response_body)
+
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
