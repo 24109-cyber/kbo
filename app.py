@@ -32,9 +32,9 @@ def get_my_kbo_game(registered_team):
     """다음 스포츠의 실시간 내부 데이터 서버(JSON API)를 직접 호출하여 100% 매칭"""
     # 해외 서버 시간대 보정 (한국 시간 KST 세팅)
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    today_str = kst_now.strftime("%Y-%m-%d")  # 예: '2026-06-18'
+    today_str = kst_now.strftime("%Y-%m-%d")
 
-    # 💡 웹페이지 대신 다음 스포츠가 내부적으로 데이터를 몰래 불러오는 진짜 실시간 API 주소!
+    # 다음 스포츠 실시간 JSON 데이터 내부 API 주소
     url = f"https://sports.daum.net/prx/hermes/api/schedule/kbo?date={today_str}"
 
     headers = {
@@ -46,24 +46,28 @@ def get_my_kbo_game(registered_team):
         if response.status_code != 200:
             return "경기 일정을 불러올 수 없습니다. (포털 서버 API 응답 에러)"
 
-        # HTML 파싱 대신 훨씬 정확하고 빠른 JSON 데이터 통째로 읽기
         data = response.json()
         games = data.get("scheduleList", [])
 
         if not games:
             return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (휴식일)"
 
-        # 사용자가 등록한 풀네임(예: "KT 위즈")에서 공백 빼고 앞 2글자(예: "KT") 추출
-        short_team_name = registered_team.replace(" ", "")[:2]
+        # 💡 유저가 설정한 짧은 팀 이름(KT, KIA, 삼성 등)에서 공백 제거
+        search_team = registered_team.replace(" ", "").strip()
 
         for game in games:
-            team_left_name = game.get("teamName1", "").strip()  # 원정팀
-            team_right_name = game.get("teamName2", "").strip()  # 홈팀
+            # 다음 스포츠에서 준 원래 팀 이름도 공백을 제거해서 비교 준비 (예: "KT 위즈" -> "KT위즈")
+            team_left_name = game.get("teamName1", "").replace(" ", "").strip()  # 원정팀
+            team_right_name = game.get("teamName2", "").replace(" ", "").strip()  # 홈팀
 
-            # 내가 등록한 팀 이름 조각이 대진표에 있는지 매칭 검사
-            if (short_team_name in team_left_name) or (
-                short_team_name in team_right_name
+            # 💡 유저가 고른 글자(KT, KIA, 삼성 등)가 다음 스포츠 팀 이름에 포함되어 있는지 유연하게 검사!
+            if (search_team in team_left_name) or (
+                search_team in team_right_name
             ):
+                # 챗봇 화면에 보여줄 때는 원래 풀네임(KT 위즈, 삼성 라이온즈 등)으로 깔끔하게 표시
+                display_left = game.get("teamName1", "").strip()
+                display_right = game.get("teamName2", "").strip()
+
                 # 경기 시간 추출 및 가공 (예: "1830" -> "18:30")
                 raw_time = game.get("startTime", "1830")
                 game_time = (
@@ -84,8 +88,8 @@ def get_my_kbo_game(registered_team):
                 result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
                 result_text += f"📅 날짜: {today_str}\n"
                 result_text += f"⏰ 시간: {game_time}\n"
-                result_text += f"⚾ {team_left_name} ({pitcher_left}) vs {team_right_name} ({pitcher_right})\n\n"
-                result_text += "※ 다음 스포츠 실시간 API 연동 성공"
+                result_text += f"⚾ {display_left} ({pitcher_left}) vs {display_right} ({pitcher_right})\n\n"
+                result_text += "※ 다음 스포츠 실시간 데이터 반영 완료"
                 return result_text
 
         return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
@@ -97,7 +101,7 @@ def get_my_kbo_game(registered_team):
 
 
 # -------------------------------------------------------------
-# [스킬 1] 응원 팀 등록 주소 (/register-team) -> 🔥 파라미터 파싱 구조 전면 수정!
+# [스킬 1] 응원 팀 등록 주소 (/register-team)
 # -------------------------------------------------------------
 @app.route("/register-team", methods=["POST"])
 def register_team():
@@ -105,9 +109,9 @@ def register_team():
 
     try:
         user_id = req["userRequest"]["user"]["id"]
-        # 💡 [긴급 수정] clientExtra 대신 캡처 화면의 '추가 정보(params)' 규격으로 정확히 연결!
-        selected_team = req["action"]["params"]["team"]
-    except (KeyError, TypeError):
+        # 버튼의 [추가 정보]에 담긴 키값 데이터를 clientExtra에서 정확하게 쏙 꺼내옵니다.
+        selected_team = req["action"]["clientExtra"]["team"]
+    except (KeyError, TypeError) as e:
         return jsonify(
             {
                 "version": "2.0",
@@ -115,7 +119,7 @@ def register_team():
                     "outputs": [
                         {
                             "simpleText": {
-                                "text": "⚠️ 팀 등록 중 에러가 발생했습니다. 카카오톡 봇 설정을 확인해 주세요."
+                                "text": f"⚠️ 팀 등록 실패 (데이터 추출 오류)\n원인: {str(e)}"
                             }
                         }
                     ]
@@ -169,7 +173,6 @@ def show_match():
             }
         )
 
-    # 수정된 고성능 API 크롤링 함수 호출
     match_text = get_my_kbo_game(my_team)
 
     return jsonify(
