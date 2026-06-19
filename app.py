@@ -2,15 +2,15 @@ import datetime
 import json
 import os
 import base64
+import requests
 from flask import Flask, jsonify, request
 from openai import OpenAI
-from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
 DB_FILE = "user_teams.json"
 
-# OpenAI 클라이언트 초기화 (Vision 기능을 쓰기 위해 필수)
+# OpenAI 클라이언트 초기화
 OPENAI_API_KEY = os.environ.get("OPEN_API_KEY", "")
 client = None
 if OPENAI_API_KEY:
@@ -33,9 +33,9 @@ def save_data(data):
 
 
 # -------------------------------------------------------------
-# 📸 [혁신] 네이버 야구 화면을 진짜 캡처해서 GPT로 글자 읽기
+# 📸 [우회] 외부 캡처 서비스를 이용해 네이버 야구 화면을 가져온 뒤 GPT 분석
 # -------------------------------------------------------------
-def get_match_by_screenshot(registered_team):
+def get_match_by_screenshot_api(registered_team):
     if not client:
         return "⚠️ OpenAI API 키가 설정되지 않아 화면 분석을 할 수 없습니다."
 
@@ -43,54 +43,48 @@ def get_match_by_screenshot(registered_team):
     today_str = kst_now.strftime("%Y%m%d")
     today_display = kst_now.strftime("%Y-%m-%d")
 
-    url = f"https://sports.news.naver.com/kbaseball/schedule/index?date={today_str}"
-    screenshot_path = "/tmp/naver_kbo.png"
+    # 네이버 KBO 프로야구 일정 URL
+    naver_url = f"https://sports.news.naver.com/kbaseball/schedule/index?date={today_str}"
+    
+    # 💡 무료 글로벌 웹 스크린샷 렌더링 API 사용 (서버에 브라우저를 깔지 않는 방식)
+    # thum.io 서비스는 특정 URL을 브라우저로 열어 이미지로 반환해줍니다.
+    capture_api_url = f"https://image.thum.io/get/width/1280/crop/800/{naver_url}"
 
     try:
-        # 1. 플레이라이트 브라우저를 열어 실제 네이버 화면 캡처하기
-        with sync_playwright() as p:
-            # Render 환경(리눅스) 대응을 위해 headless=True, 가벼운 크로미움 실행
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 1024})
-            
-            # 네이버 야구 일정 페이지로 이동 (완전히 로딩될 때까지 최대 10초 대기)
-            page.goto(url, wait_until="networkidle", timeout=10000)
-            page.wait_for_timeout(2000) # 리액트 동적 렌더링 안정화 대기
-            
-            # 야구 일정 스케줄러가 들어있는 구역만 정밀 캡처 (or 전체화면)
-            container = page.query_selector("#_schedule_box") or page.query_selector(".content_schedule")
-            if container:
-                container.screenshot(path=screenshot_path)
-            else:
-                page.screenshot(path=screenshot_path, full_page=True)
-                
-            browser.close()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        # 외부 API를 호출하여 이미지 바이너리 획득
+        img_response = requests.get(capture_api_url, headers=headers, timeout=15)
+        if img_response.status_code != 200:
+            return "⚠️ 네이버 화면을 이미지로 변환하는 데 실패했습니다. (외부 API 지연)"
 
-        # 2. 캡처한 이미지를 OpenAI API에 보낼 수 있게 Base64로 변환
-        with open(screenshot_path, "rb") as image_file:
-            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+        # 이미지를 Base64 인코딩
+        base64_image = base64.b64encode(img_response.content).decode('utf-8')
 
-        # 3. GPT-4o-mini의 Vision 기능을 이용해 이미지 안의 글자 판독 및 추출
+        # GPT-4o-mini Vision 분석 요청
         prompt = f"""
-        첨부된 이미지는 오늘 대한민국 프로야구(KBO) 경기 일정표 스크린샷이야.
-        이미지 안에서 사용자가 요청한 응원 팀인 [{registered_team}]의 경기 일정을 찾아서 양식에 맞춰 답변해줘.
+        첨부된 이미지는 오늘 KBO 프로야구 경기 일정표 화면이야.
+        이미지에서 사용자가 지정한 팀인 [{registered_team}]의 경기 일정을 찾아서 출력 양식에 맞게 텍스트로만 요약해줘.
         
-        [주의사항]
-        1. 만약 이미지 안에 [{registered_team}] 팀의 경기가 버젓이 있다면 절대 '일정이 없다'고 하지 말고, 눈에 보이는 팀명과 그 바로 옆에 적힌 선발 투수 이름을 그대로 읽어내야 해. (예: 롯데 이민석, 삼성 후라도, 한화 박준영 등)
-        2. 오늘 날짜는 {today_display}이야.
-        
-        [답변 양식]
+        [지시사항]
+        1. 오늘 날짜는 {today_display}이야.
+        2. 이미지 안에 [{registered_team}]의 경기가 적혀있다면 팀 이름 바로 옆에 붙어있는 선발 투수 이름(예: 이민석, 후라도 등)을 찾아서 괄호 안에 매칭해줘야 해.
+        3. 만약 텍스트 판독이 어렵거나 누락되었다면, 이미지에 보이는 텍스트 흐름을 유추해서 최대한 완성해줘.
+
+        [출력 양식]
         ⭐ 내가 등록한 팀 [{registered_team}] 경기 정보
 
         📅 날짜: {today_display}
-        ⏰ 시간: [이미지에 적힌 경기 시간, 예: 18:30]
+        ⏰ 시간: [경기 시간, 예: 18:30]
         ⚾ [원정팀]([원정선발]) vs [홈팀]([홈선발])
 
-        ※ 네이버 스포츠 화면 실시간 이미지 분석 완료
+        ※ 실시간 네이버 야구 전광판 비전 분석 결과입니다.
         """
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",  # 이미지 분석이 가능한 강력하고 가벼운 모델
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "user",
@@ -111,7 +105,7 @@ def get_match_by_screenshot(registered_team):
         return response.choices[0].message.content.strip()
 
     except Exception as e:
-        return f"📸 화면 캡처 및 분석 중 오류가 발생했습니다.\n원인: {str(e)}"
+        return f"⚠️ 이미지 기반 야구 전광판 분석 중 에러가 발생했습니다.\n원인: {str(e)}"
 
 
 # -------------------------------------------------------------
@@ -129,7 +123,7 @@ def register_team():
             selected_team = req["action"]["params"]["team"]
             
         if not selected_team:
-            raise Exception("팀 정보 추출 실패")
+            raise Exception("팀 정보 누락")
     except Exception as e:
         return jsonify({
             "version": "2.0",
@@ -142,7 +136,7 @@ def register_team():
 
     return jsonify({
         "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": f"🎉 {selected_team} 등록 완료!\n오늘 경기 조회를 해보세요."}}]}
+        "template": {"outputs": [{"simpleText": {"text": f"🎉 {selected_team} 등록 완료!\n'경기'를 입력해 스크린샷 분석 데이터를 받아보세요."}}]}
     })
 
 
@@ -163,8 +157,8 @@ def show_match():
             "template": {"outputs": [{"simpleText": {"text": "아직 응원 팀이 등록되지 않았어요! 😅"}}]}
         })
 
-    # 📸 새로 만든 이미지 분석 함수 호출!
-    match_text = get_match_by_screenshot(my_team)
+    # 📸 외부 이미지 캡처 연동형 함수 호출
+    match_text = get_match_by_screenshot_api(my_team)
     
     return jsonify({
         "version": "2.0",
@@ -177,14 +171,11 @@ def show_match():
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
-    # 순위는 기존 텍스트 파싱을 유지하되, 필요 시 안정적으로 구동되게 보완
     url = "https://m.sports.naver.com/kbaseball/record/kbo?seasonCode=2026&tab=teamRank"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     try:
-        import requests
-        from bs4 import BeautifulSoup
         response = requests.get(url, headers=headers, timeout=7)
         soup = BeautifulSoup(response.text, "html.parser")
         rows = soup.select("ol[class*='TableBody_list'] li")
