@@ -1,16 +1,16 @@
 import datetime
 import json
 import os
-import requests
-from bs4 import BeautifulSoup
+import base64
 from flask import Flask, jsonify, request
 from openai import OpenAI
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
 DB_FILE = "user_teams.json"
 
-# OpenAI 클라이언트 초기화
+# OpenAI 클라이언트 초기화 (Vision 기능을 쓰기 위해 필수)
 OPENAI_API_KEY = os.environ.get("OPEN_API_KEY", "")
 client = None
 if OPENAI_API_KEY:
@@ -33,110 +33,85 @@ def save_data(data):
 
 
 # -------------------------------------------------------------
-# ⚾ [정밀 스크래핑] 네이버 스포츠 KBO 일정 페이지 HTML 직접 조준 파싱
+# 📸 [혁신] 네이버 야구 화면을 진짜 캡처해서 GPT로 글자 읽기
 # -------------------------------------------------------------
-def get_my_kbo_game(registered_team):
-    # 한국 시간(KST) 구하기
+def get_match_by_screenshot(registered_team):
+    if not client:
+        return "⚠️ OpenAI API 키가 설정되지 않아 화면 분석을 할 수 없습니다."
+
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    today_str = kst_now.strftime("%Y%m%d")  # 20260619 형식
+    today_str = kst_now.strftime("%Y%m%d")
     today_display = kst_now.strftime("%Y-%m-%d")
 
-    # 네이버 야구 일정 페이지 PC 버전 URL
     url = f"https://sports.news.naver.com/kbaseball/schedule/index?date={today_str}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    screenshot_path = "/tmp/naver_kbo.png"
 
     try:
-        response = requests.get(url, headers=headers, timeout=7)
-        if response.status_code != 200:
-            return "경기 일정을 불러올 수 없습니다. (네이버 접속 실패)"
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # 💡 [핵심] 네이버 일정 테이블에서 오늘 경기 행(li)들을 전부 수집
-        # 제공된 스크린샷 구조의 클래스 리스트 타격
-        match_rows = soup.select("ul.content_schedule_list li") or soup.select("[class*='MatchBox_match_item']")
-        
-        # 만약 리액트 컴포넌트 내부 클래스가 숨겨져 있을 경우, 메인 캘린더 바디 타격
-        if not match_rows:
-            match_rows = soup.select("#calendarBody tr") or soup.select(".sch_tb tr")
-
-        search_team = registered_team.replace(" ", "").strip()
-
-        for row in match_rows:
-            row_text = row.get_text()
+        # 1. 플레이라이트 브라우저를 열어 실제 네이버 화면 캡처하기
+        with sync_playwright() as p:
+            # Render 환경(리눅스) 대응을 위해 headless=True, 가벼운 크로미움 실행
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 1024})
             
-            # 내가 등록한 팀이 이 경기 행에 포함되어 있다면!
-            if search_team in row_text.replace(" ", ""):
+            # 네이버 야구 일정 페이지로 이동 (완전히 로딩될 때까지 최대 10초 대기)
+            page.goto(url, wait_until="networkidle", timeout=10000)
+            page.wait_for_timeout(2000) # 리액트 동적 렌더링 안정화 대기
+            
+            # 야구 일정 스케줄러가 들어있는 구역만 정밀 캡처 (or 전체화면)
+            container = page.query_selector("#_schedule_box") or page.query_selector(".content_schedule")
+            if container:
+                container.screenshot(path=screenshot_path)
+            else:
+                page.screenshot(path=screenshot_path, full_page=True)
                 
-                # 1. 경기 시간 파싱 (보통 맨 앞에 18:30 등으로 배치됨)
-                time_str = "18:30"
-                for token in row_text.split():
-                    if ":" in token and len(token) <= 5:
-                        time_str = token
-                        break
+            browser.close()
 
-                # 2. 좌측/우측 팀 정보 및 선발 투수 텍스트 추출 정밀화
-                # 클래스 난수를 회피하기 위해 span 및 div 내부 텍스트 노드를 스캔
-                teams_and_pitchers = []
-                
-                # 팀명과 투수명이 묶여있는 태그나 일반 텍스트 내에서 이름 쌍 찾기
-                # 스크린샷 구조: [KIA 네일], [KT 오원석], [삼성 후라도], [한화 박준영]
-                # row 내부의 텍스트 노드 중 2글자(팀명) + 이름(투수명) 조합을 정규 필터링
-                words = [w.strip() for w in row_text.split() if w.strip()]
-                
-                # '예정', '전력', '분석', '응원', 'VS', 'V', 'S', time_str 제거하여 순수 데이터만 추출
-                clean_words = []
-                for w in words:
-                    if w in ["예정", "종료", "전력", "분석", "응원", "VS", "경기", "취소", time_str]:
-                        continue
-                    # 💡 홈/원정 표시 글자 떼기
-                    w_clean = w.replace("홈", "").strip()
-                    if w_clean:
-                        clean_words.append(w_clean)
+        # 2. 캡처한 이미지를 OpenAI API에 보낼 수 있게 Base64로 변환
+        with open(screenshot_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
-                # clean_words 예시: ['롯데', '이민석', '키움', '알칸타라'] 또는 ['삼성', '후라도', '한화', '박준영']
-                if len(clean_words) >= 4:
-                    away_team = clean_words[0]
-                    away_pitcher = clean_words[1]
-                    home_team = clean_words[2]
-                    home_pitcher = clean_words[3]
-                else:
-                    # 토큰 분리가 불 명확할 경우 텍스트 영역 직접 파싱 시도 (백업 가공)
-                    # 텍스트 전체에서 선발 투수 명이 매칭되도록 강제 설정
-                    away_team = "원정"
-                    away_pitcher = "선발 미정"
-                    home_team = "홈"
-                    home_pitcher = "선발 미정"
-                    
-                    # 수동 파싱 보완
-                    all_spans = [s.get_text().strip() for s in row.select("span") if s.get_text().strip()]
-                    if len(all_spans) >= 4:
-                        away_team, away_pitcher, home_team, home_pitcher = TensorMatch(all_spans)
+        # 3. GPT-4o-mini의 Vision 기능을 이용해 이미지 안의 글자 판독 및 추출
+        prompt = f"""
+        첨부된 이미지는 오늘 대한민국 프로야구(KBO) 경기 일정표 스크린샷이야.
+        이미지 안에서 사용자가 요청한 응원 팀인 [{registered_team}]의 경기 일정을 찾아서 양식에 맞춰 답변해줘.
+        
+        [주의사항]
+        1. 만약 이미지 안에 [{registered_team}] 팀의 경기가 버젓이 있다면 절대 '일정이 없다'고 하지 말고, 눈에 보이는 팀명과 그 바로 옆에 적힌 선발 투수 이름을 그대로 읽어내야 해. (예: 롯데 이민석, 삼성 후라도, 한화 박준영 등)
+        2. 오늘 날짜는 {today_display}이야.
+        
+        [답변 양식]
+        ⭐ 내가 등록한 팀 [{registered_team}] 경기 정보
 
-                # 최종 문자열 조립
-                result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
-                result_text += f"📅 날짜: {today_display}\n"
-                result_text += f"⏰ 시간: {time_str}\n"
-                result_text += f"⚾ {away_team}({away_pitcher}) vs {home_team}({home_pitcher})\n\n"
-                result_text += "※ 네이버 스포츠 화면 스크래핑 성공"
-                return result_text
+        📅 날짜: {today_display}
+        ⏰ 시간: [이미지에 적힌 경기 시간, 예: 18:30]
+        ⚾ [원정팀]([원정선발]) vs [홈팀]([홈선발])
 
-        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
+        ※ 네이버 스포츠 화면 실시간 이미지 분석 완료
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # 이미지 분석이 가능한 강력하고 가벼운 모델
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=400
+        )
+
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
-        return f"경기 정보 파싱 오류 발생: {str(e)}"
-
-def TensorMatch(span_list):
-    # 유용 텍스트 추출 헬퍼 함수
-    res = []
-    for s in span_list:
-        if s not in ["예정","전력","분석","응원","VS","","홈"]:
-            res.append(s)
-    if len(res) >= 4:
-        return res[0], res[1], res[2], res[3]
-    return "원정", "선발 미정", "홈", "선발 미정"
+        return f"📸 화면 캡처 및 분석 중 오류가 발생했습니다.\n원인: {str(e)}"
 
 
 # -------------------------------------------------------------
@@ -147,22 +122,18 @@ def register_team():
     req = request.get_json()
     try:
         user_id = req["userRequest"]["user"]["id"]
-        
         selected_team = None
         if "clientExtra" in req.get("action", {}) and "team" in req["action"]["clientExtra"]:
             selected_team = req["action"]["clientExtra"]["team"]
         elif "params" in req.get("action", {}) and "team" in req["action"]["params"]:
             selected_team = req["action"]["params"]["team"]
-        elif "detailParams" in req.get("action", {}) and "team" in req["action"]["detailParams"]:
-            selected_team = req["action"]["detailParams"]["team"]["value"]
             
         if not selected_team:
-            raise Exception("팀 파라미터가 비어있습니다.")
-            
+            raise Exception("팀 정보 추출 실패")
     except Exception as e:
         return jsonify({
             "version": "2.0",
-            "template": {"outputs": [{"simpleText": {"text": f"⚠️ 팀 등록 실패\n원인: {str(e)}"}}]}
+            "template": {"outputs": [{"simpleText": {"text": f"⚠️ 팀 등록 실패: {str(e)}"}}]}
         })
 
     user_data = load_data()
@@ -171,13 +142,7 @@ def register_team():
 
     return jsonify({
         "version": "2.0",
-        "template": {
-            "outputs": [{
-                "simpleText": {
-                    "text": f"🎉 {selected_team} 등록 완료!\n실시간 순위와 매치 정보를 확인해보세요."
-                }
-            }]
-        },
+        "template": {"outputs": [{"simpleText": {"text": f"🎉 {selected_team} 등록 완료!\n오늘 경기 조회를 해보세요."}}]}
     })
 
 
@@ -195,58 +160,15 @@ def show_match():
     if not my_team:
         return jsonify({
             "version": "2.0",
-            "template": {"outputs": [{"simpleText": {"text": "아직 응원 팀이 등록되지 않았어요! 😅\n'팀 등록'을 먼저 진행해 주세요."}}]}
-        })
-
-    match_text = get_my_kbo_game(my_team)
-    return jsonify({
-        "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": match_text}}]}
-    })
-
-
-# -------------------------------------------------------------
-# [스킬 3] GPT 팀 전망 분석 (/show-forecast)
-# -------------------------------------------------------------
-@app.route("/show-forecast", methods=["POST"])
-def show_forecast():
-    req = request.get_json()
-    user_id = req["userRequest"]["user"]["id"]
-
-    user_data = load_data()
-    my_team = user_data.get(user_id)
-
-    if not my_team:
-        return jsonify({
-            "version": "2.0",
             "template": {"outputs": [{"simpleText": {"text": "아직 응원 팀이 등록되지 않았어요! 😅"}}]}
         })
 
-    if not client:
-        return jsonify({
-            "version": "2.0",
-            "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않았습니다."}}]}
-        })
-
-    try:
-        prompt = f"2026년 KBO 리그 시즌 기준으로 [{my_team}] 팀의 전력과 전망을 야구 전문가 말투로 200자 내외 요약해줘."
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "너는 KBO 야구 전문가 챗봇이야."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300,
-            temperature=0.7
-        )
-        gpt_answer = response.choices[0].message.content.strip()
-        forecast_text = f"🔮 GPT 분석 [{my_team}] 전망\n\n{gpt_answer}"
-    except Exception as e:
-        forecast_text = f"⚠️ GPT 분석 실패: {str(e)}"
-
+    # 📸 새로 만든 이미지 분석 함수 호출!
+    match_text = get_match_by_screenshot(my_team)
+    
     return jsonify({
         "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": forecast_text}}]}
+        "template": {"outputs": [{"simpleText": {"text": match_text}}]}
     })
 
 
@@ -255,45 +177,35 @@ def show_forecast():
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
+    # 순위는 기존 텍스트 파싱을 유지하되, 필요 시 안정적으로 구동되게 보완
     url = "https://m.sports.naver.com/kbaseball/record/kbo?seasonCode=2026&tab=teamRank"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-
     try:
+        import requests
+        from bs4 import BeautifulSoup
         response = requests.get(url, headers=headers, timeout=7)
         soup = BeautifulSoup(response.text, "html.parser")
-
         rows = soup.select("ol[class*='TableBody_list'] li")
 
-        if not rows:
-            raise Exception("데이터 파싱 실패")
-
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
-
         for row in rows:
             rank_tag = row.select_one("em[class*='TeamInfo_ranking']")
             team_tag = row.select_one("div[class*='TeamInfo_team_name']")
-            
             cells = row.select("div[class*='TableRow_cell_text']")
-            win_rate = "-"
-            if len(cells) >= 5:
-                win_rate = cells[4].get_text().strip()
+            win_rate = cells[4].get_text().strip() if len(cells) >= 5 else "-"
 
             if rank_tag and team_tag:
-                rank = rank_tag.get_text().replace("위", "").strip()
-                team_name = team_tag.get_text().strip()
-                ranking_list.append(f"{rank}위: {team_name} (승률: {win_rate})")
-
+                ranking_list.append(f"{rank_tag.get_text().strip()}위: {team_tag.get_text().strip()} (승률: {win_rate})")
         ranking_list.append("-------------------------")
-        final_ranking_text = "\n".join(ranking_list)
-
+        final_text = "\n".join(ranking_list)
     except Exception as e:
-        final_ranking_text = f"⚠️ 실시간 순위를 가져오는 중 오류가 발생했습니다.\n원인: {str(e)}"
+        final_text = f"⚠️ 순위 가져오기 실패: {str(e)}"
 
     return jsonify({
         "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": final_ranking_text}}]}
+        "template": {"outputs": [{"simpleText": {"text": final_text}}]}
     })
 
 
