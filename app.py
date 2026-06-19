@@ -213,7 +213,7 @@ def show_ranking():
         response = requests.get(url, headers=headers, timeout=7)
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # 네이버 동적 클래스 li 목록 전체 추출
+        # HTML에서 각 팀의 행(li)들을 수집
         rows = soup.select("ol[class*='TableBody_list'] li")
 
         if not rows:
@@ -222,19 +222,17 @@ def show_ranking():
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
 
         for row in rows:
+            # 순위와 팀명 태그만 정확히 타겟팅
             rank_tag = row.select_one("em[class*='TeamInfo_ranking']")
             team_tag = row.select_one("div[class*='TeamInfo_team_name']")
-            
-            # 난수 클래스를 회피하기 위해 승률(wra)을 담고 있는 텍스트 영역을 인덱스로 추적
-            cells = row.select("div[class*='TableRow_cell_text']")
-            win_rate = "-"
-            if len(cells) >= 5:
-                win_rate = cells[4].get_text().strip()  # 5번째 셀이 보통 승률 데이터
 
             if rank_tag and team_tag:
+                # '위' 글씨나 공백을 지우고 깔끔하게 숫자만 추출
                 rank = rank_tag.get_text().replace("위", "").strip()
                 team_name = team_tag.get_text().strip()
-                ranking_list.append(f"{rank}위: {team_name} (승률: {win_rate})")
+                
+                # 순위와 팀 이름만 리스트에 추가
+                ranking_list.append(f"{rank}위: {team_name}")
 
         ranking_list.append("-------------------------")
         ranking_list.append("※ 네이버 스포츠 실시간 반영 완료")
@@ -247,7 +245,3 @@ def show_ranking():
         "version": "2.0",
         "template": {"outputs": [{"simpleText": {"text": final_ranking_text}}]}
     })
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
