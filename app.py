@@ -1,7 +1,6 @@
 import datetime
 import json
 import os
-import re
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, request
@@ -49,7 +48,7 @@ def get_my_kbo_game(registered_team):
     try:
         response = requests.get(url, headers=headers, timeout=7)
         if response.status_code != 200:
-            return "경기 일정을 불러올 수 없습니다. (네이버 API 응답 실패)"
+            return "경기 일정을 불러올 수 없습니다. (데이터 서버 응답 실패)"
 
         data = response.json()
         games = data.get("result", {}).get("games", [])
@@ -81,7 +80,7 @@ def get_my_kbo_game(registered_team):
                 result_text += f"📅 날짜: {today_str}\n"
                 result_text += f"⏰ 시간: {game_time}\n"
                 result_text += f"⚾ {display_left} ({pitcher_left}) vs {display_right} ({pitcher_right})\n\n"
-                result_text += "※ 네이버 스포츠 실시간 데이터"
+                result_text += "※ 실시간 경기 데이터 반영"
                 return result_text
 
         return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다."
@@ -200,59 +199,52 @@ def show_forecast():
 
 
 # -------------------------------------------------------------
-# [스킬 4] 🛠️ 실시간 순위 조회 API (403 우회 및 태그 깨짐 방지 융합형)
+# [스킬 4] 🛠️ 실시간 순위 조회 API (가장 안정적인 Daum 스포츠 소스로 대체 우회)
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
-    # 💡 403 차단이 전혀 없는 네이버 모바일 웹 페이지 경로 사용
-    url = "https://m.sports.naver.com/kbaseball/record/kbo?seasonCode=2026"
+    # 💡 네이버 대안으로 봇 차단 및 구조 변경이 적고 깔끔한 Daum 스포츠 순위 구조 활용
+    url = "https://sports.daum.net/prx/hermes/api/team/rank.json?leagueCode=kbo&seasonKey=2026_REGULAR"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
         response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code != 200:
-            return jsonify({
-                "version": "2.0",
-                "template": {"outputs": [{"simpleText": {"text": f"⚠️ 네이버 페이지 접속 불가 (코드: {response.status_code})"}}]}
-            })
-
-        html_content = response.text
-        soup = BeautifulSoup(html_content, "html.parser")
-
-        # 💡 [핵심] 클래스명 변경 대처: 태그 속성에 'TeamInfo_ranking'과 'team_name'이 포함되어 있는 모든 요소를 가져옴
-        rank_elements = soup.find_all(lambda tag: tag.name == "em" and any("TeamInfo_ranking" in cls for cls in tag.get("class", [])))
-        team_elements = soup.find_all(lambda tag: tag.name == "div" and any("TeamInfo_team_name" in cls for cls in tag.get("class", [])))
-
-        # 만약 클래스 파싱에 실패했을 경우를 위한 2차 방어선 (정규식 텍스트 스캔)
-        if not rank_elements or not team_elements:
-            # HTML 스크립트 소스 내 데이터 객체에서 팀 데이터 순서대로 강제 추출
-            found_teams = re.findall(r'"teamName"\s*:\s*"([^"]+)"', html_content)
-            if found_teams:
-                # 네이버 스크립트에서 중복 매칭되는 원본 데이터만 필터링 (KBO 팀 수 기준 상위 10개)
-                unique_teams = []
-                for t in found_teams:
-                    if t not in unique_teams:
-                        unique_teams.append(t)
-                final_teams = unique_teams[:10]
-            else:
-                raise Exception("순위 데이터를 텍스트 레벨에서 파싱하지 못했습니다.")
-        else:
-            final_teams = [team.get_text().strip() for team in team_elements[:10]]
-
-        # 출력 텍스트 빌드 (오직 순위와 팀명만 정갈하게 구성)
-        ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
         
-        for idx, team_name in enumerate(final_teams, start=1):
-            ranking_list.append(f"{idx}위: {team_name}")
+        # 만약 Daum 소스 접속에 실패하거나 데이터 구조가 비어있을 때의 2안 (네이버 서브 API 우회)
+        if response.status_code != 200:
+            url = "https://sports.news.naver.com/kbaseball/record/index?category=kbo"
+            res = requests.get(url, headers=headers, timeout=5)
+            soup = BeautifulSoup(res.text, "html.parser")
+            # 백업용 텍스트 파싱 시도
+            teams_data = soup.find_all("span", class_="name")
+            if not teams_data:
+                raise Exception("모든 순위 제공 소스의 접속이 일시적으로 제한되었습니다.")
+            
+            ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
+            for idx, team in enumerate(teams_data[:10], start=1):
+                ranking_list.append(f"{idx}위: {team.get_text().strip()}")
+        else:
+            # 기본 Daum JSON 데이터 깔끔하게 추출
+            data = response.json()
+            teams = data.get("list", [])
+            
+            if not teams:
+                raise Exception("순위 데이터가 비어 있습니다.")
+
+            ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
+            for team in teams:
+                rank = team.get("rank", "-")
+                team_name = team.get("teamName", "-")
+                ranking_list.append(f"{rank}위: {team_name}")
 
         ranking_list.append("-------------------------")
-        ranking_list.append("※ 네이버 스포츠 실시간 반영 완료")
+        ranking_list.append("※ 실시간 스포츠 데이터 반영 완료")
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        final_ranking_text = f"⚠️ 순위 조회 중 오류가 발생했습니다.\n원인: {str(e)}"
+        final_ranking_text = f"⚠️ 순위 조회 중 시스템 오류가 발생했습니다.\n원인: {str(e)}"
 
     return jsonify({
         "version": "2.0",
