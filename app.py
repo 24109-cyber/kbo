@@ -204,42 +204,42 @@ def show_forecast():
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
-    url = "https://m.sports.naver.com/kbaseball/record/kbo?seasonCode=2026&tab=teamRank"
+    # 💡 HTML 파싱 대신 네이버가 내부적으로 순위 데이터를 받아오는 진짜 API 주소 사용
+    url = "https://api-gw.sports.naver.com/kbaseball/category/record/team?seasonCode=2026"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=7)
-        soup = BeautifulSoup(response.text, "html.parser")
+        # 1. 네이버 순위 API 호출 (타임아웃 3초 제한으로 안정성 확보)
+        response = requests.get(url, headers=headers, timeout=3)
+        if response.status_code != 200:
+            return jsonify({"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "⚠️ 네이버 순위 데이터 서버가 응답하지 않습니다."}}]}})
 
-        # HTML에서 각 팀의 행(li)들을 수집
-        rows = soup.select("ol[class*='TableBody_list'] li")
+        # 2. JSON 데이터 파싱
+        data = response.json()
+        
+        # 정규시즌(regularSeason) 결과 안의 팀 순위 목록 리스트 추출
+        teams = data.get("result", {}).get("regularSeason", {}).get("teamRecordList", [])
 
-        if not rows:
-            raise Exception("HTML에서 순위 테이블 요소를 찾지 못했습니다.")
+        if not teams:
+            return jsonify({"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "⚠️ 현재 조회 가능한 2026 KBO 순위 데이터가 없습니다."}}]}})
 
+        # 3. 출력 텍스트 빌드 (순위와 팀 이름만 깔끔하게 조합)
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
 
-        for row in rows:
-            # 순위와 팀명 태그만 정확히 타겟팅
-            rank_tag = row.select_one("em[class*='TeamInfo_ranking']")
-            team_tag = row.select_one("div[class*='TeamInfo_team_name']")
-
-            if rank_tag and team_tag:
-                # '위' 글씨나 공백을 지우고 깔끔하게 숫자만 추출
-                rank = rank_tag.get_text().replace("위", "").strip()
-                team_name = team_tag.get_text().strip()
-                
-                # 순위와 팀 이름만 리스트에 추가
-                ranking_list.append(f"{rank}위: {team_name}")
+        for team in teams:
+            rank = team.get("rank", "-")          # 순위 숫자 추출
+            team_name = team.get("teamName", "-") # 팀명 추출 (예: LG, 두산, 삼성 등)
+            ranking_list.append(f"{rank}위: {team_name}")
 
         ranking_list.append("-------------------------")
-        ranking_list.append("※ 네이버 스포츠 실시간 반영 완료")
+        ranking_list.append("※ 네이버 스포츠 실시간 API 반영 완")
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        final_ranking_text = f"⚠️ 실시간 순위를 가져오는 중 오류가 발생했습니다.\n원인: {str(e)}"
+        # 에러 발생 시 로그 확인용 출력
+        final_ranking_text = f"⚠️ 순위 조회 중 오류가 발생했습니다.\n원인: {str(e)}"
 
     return jsonify({
         "version": "2.0",
