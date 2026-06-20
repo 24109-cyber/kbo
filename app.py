@@ -1,131 +1,255 @@
+import datetime
+import json
 import os
-from flask import Flask, request, jsonify
 import requests
+from bs4 import BeautifulSoup
+from flask import Flask, jsonify, request
+from openai import OpenAI
 
 app = Flask(__name__)
 
-# 유저들의 선택 팀을 임시 저장할 딕셔너리 (메모리 저장 방식)
-USER_TEAMS = {}
+DB_FILE = "user_teams.json"
 
-# 1. 팀 등록 API (예: 롯데 자이언츠, 삼성 등)
+# OpenAI 클라이언트 초기화 (환경 변수 체크)
+OPENAI_API_KEY = os.environ.get("OPEN_API_KEY", "")
+client = None
+if OPENAI_API_KEY:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+def load_data():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except:
+                return {}
+    return {}
+
+
+def save_data(data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+
+# -------------------------------------------------------------
+# ⚾ [크롤링] 네이버 스포츠 KBO 오늘 경기 일정 조회
+# -------------------------------------------------------------
+def get_my_kbo_game(registered_team):
+    # 한국 시간(KST) 구하기
+    kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    today_str = kst_now.strftime("%Y-%m-%d")
+
+    url = f"https://api-gw.sports.naver.com/schedule/games?upperCategoryId=kbaseball&date={today_str}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=7)
+        if response.status_code != 200:
+            return "경기 일정을 불러올 수 없습니다. (네이버 API 응답 실패)"
+
+        data = response.json()
+        games = data.get("result", {}).get("games", [])
+
+        if not games:
+            return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (휴식일)"
+
+        search_team = registered_team.replace(" ", "").strip()
+
+        for game in games:
+            team_left_name = game.get("awayTeamName", "").replace(" ", "").strip()
+            team_right_name = game.get("homeTeamName", "").replace(" ", "").strip()
+
+            if (search_team in team_left_name) or (search_team in team_right_name):
+                display_left = game.get("awayTeamName", "").strip()
+                display_right = game.get("homeTeamName", "").strip()
+
+                game_date_time = game.get("gameDateTime", "")
+                game_time = (
+                    game_date_time.split("T")[1][:5]
+                    if "T" in game_date_time
+                    else "18:30"
+                )
+
+                pitcher_left = game.get("awayPitcherName", "미정").strip()
+                pitcher_right = game.get("homePitcherName", "미정").strip()
+
+                result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
+                result_text += f"📅 날짜: {today_str}\n"
+                result_text += f"⏰ 시간: {game_time}\n"
+                result_text += f"⚾ {display_left} ({pitcher_left}) vs {display_right} ({pitcher_right})\n\n"
+                result_text += "※ 네이버 스포츠 실시간 데이터"
+                return result_text
+
+        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다."
+
+    except Exception as e:
+        return f"경기 정보 로딩 중 에러 발생: {str(e)}"
+
+
+# -------------------------------------------------------------
+# [스킬 1] 응원 팀 등록 (/register-team) -> 원본 로직 유지 
+# -------------------------------------------------------------
 @app.route("/register-team", methods=["POST"])
 def register_team():
     req = request.get_json()
-    user_id = req.get("userRequest", {}).get("user", {}).get("id", "default_user")
-    utterance = req.get("userRequest", {}).get("utterance", "").strip()
-    
-    # 입력된 텍스트에서 팀명만 정제 (예: "롯데 자이언츠" -> "롯데")
-    team_name = utterance.split()[0] if utterance else "롯데"
-    USER_TEAMS[user_id] = team_name
+    try:
+        user_id = req["userRequest"]["user"]["id"]
+        
+        # 카카오톡 블록 파라미터 / 블록 컨텍스트 키값 그대로 유지
+        selected_team = None
+        if "clientExtra" in req.get("action", {}) and "team" in req["action"]["clientExtra"]:
+            selected_team = req["action"]["clientExtra"]["team"]
+        elif "params" in req.get("action", {}) and "team" in req["action"]["params"]:
+            selected_team = req["action"]["params"]["team"]
+            
+        if not selected_team:
+            raise Exception("팀 정보가 정상적으로 전달되지 않았습니다.")
+            
+    except Exception as e:
+        return jsonify({
+            "version": "2.0",
+            "template": {"outputs": [{"simpleText": {"text": f"⚠️ 팀 등록 실패: {str(e)}"}}]}
+        })
+
+    user_data = load_data()
+    user_data[user_id] = selected_team
+    save_data(user_data)
 
     return jsonify({
         "version": "2.0",
         "template": {
             "outputs": [{
                 "simpleText": {
-                    "text": f"🎉 [{team_name}] 등록 완료!\n실시간 순위와 경기 정보를 확인해보세요."
+                    "text": f"🎉 {selected_team} 등록 완료!\n앞으로 실시간 순위와 경기 정보를 안내해 드릴게요."
                 }
             }]
-        }
+        },
     })
 
-# 2. 초고속 실시간 순위 조회 API (팀명만 노출)
+
+# -------------------------------------------------------------
+# [스킬 2] 오늘 경기 조회 (/show-match)
+# -------------------------------------------------------------
+@app.route("/show-match", methods=["POST"])
+def show_match():
+    req = request.get_json()
+    user_id = req["userRequest"]["user"]["id"]
+
+    user_data = load_data()
+    my_team = user_data.get(user_id)
+
+    if not my_team:
+        return jsonify({
+            "version": "2.0",
+            "template": {"outputs": [{"simpleText": {"text": "아직 응원 팀이 등록되지 않았어요! 😅\n'팀 등록'을 먼저 진행해 주세요."}}]}
+        })
+
+    match_text = get_my_kbo_game(my_team)
+    return jsonify({
+        "version": "2.0",
+        "template": {"outputs": [{"simpleText": {"text": match_text}}]}
+    })
+
+
+# -------------------------------------------------------------
+# [스킬 3] GPT 팀 전망 분석 (/show-forecast)
+# -------------------------------------------------------------
+@app.route("/show-forecast", methods=["POST"])
+def show_forecast():
+    req = request.get_json()
+    user_id = req["userRequest"]["user"]["id"]
+
+    user_data = load_data()
+    my_team = user_data.get(user_id)
+
+    if not my_team:
+        return jsonify({
+            "version": "2.0",
+            "template": {"outputs": [{"simpleText": {"text": "아직 응원 팀이 등록되지 않았어요! 😅"}}]}
+        })
+
+    if not client:
+        return jsonify({
+            "version": "2.0",
+            "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않았습니다."}}]}
+        })
+
+    try:
+        prompt = f"2026년 KBO 리그 시즌 기준으로 [{my_team}] 팀의 전력과 전망을 야구 전문가 말투로 200자 내외 요약해줘."
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "너는 KBO 야구 전문가 야구봇이야."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=300,
+            temperature=0.7
+        )
+        gpt_answer = response.choices[0].message.content.strip()
+        forecast_text = f"🔮 GPT 전문가가 본 [{my_team}] 전망\n\n{gpt_answer}"
+    except Exception as e:
+        forecast_text = f"⚠️ GPT 분석 실패: {str(e)}"
+
+    return jsonify({
+        "version": "2.0",
+        "template": {"outputs": [{"simpleText": {"text": forecast_text}}]}
+    })
+
+
+# -------------------------------------------------------------
+# [스킬 4] 🛠️ 실시간 순위 조회 API (팀명/순위 추출 전용 우회 헤더 보완)
+# -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
     url = "https://api-gw.sports.naver.com/kbaseball/category/record/team?seasonCode=2026"
+    
+    # 💡 네이버가 요청을 거부하거나 차단하지 않도록 철저하게 유저 브라우저로 위장
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Origin": "https://m.sports.naver.com",
+        "Referer": "https://m.sports.naver.com/"
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=3)
+        # 네이버 순위 전용 API 호출 (안정적인 4초 타임아웃 제한)
+        response = requests.get(url, headers=headers, timeout=4)
         if response.status_code != 200:
-            raise Exception("네이버 API 서버 응답 실패")
+            return jsonify({
+                "version": "2.0", 
+                "template": {"outputs": [{"simpleText": {"text": f"⚠️ 네이버 데이터 서버 상태 불안정 (응답 코드: {response.status_code})"}}]}
+            })
 
         data = response.json()
         teams = data.get("result", {}).get("regularSeason", {}).get("teamRecordList", [])
 
         if not teams:
-            return jsonify({"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "⚠️ 현재 조회 가능한 KBO 순위 데이터가 없습니다."}}]}})
+            return jsonify({"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "⚠️ 현재 조회 가능한 2026 KBO 순위 데이터가 없습니다."}}]}})
 
+        # 승률 제외, 깔끔하게 순위와 팀 이름만 결합
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
+
         for team in teams:
-            rank = team.get("rank", "-")
-            name = team.get("teamName", "-")
-            ranking_list.append(f"{rank}위: {name}")
+            rank = team.get("rank", "-")          # 순위 숫자
+            team_name = team.get("teamName", "-") # 팀명 
+            ranking_list.append(f"{rank}위: {team_name}")
 
         ranking_list.append("-------------------------")
         ranking_list.append("※ 네이버 스포츠 실시간 API 반영 완료")
-        final_text = "\n".join(ranking_list)
+        final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        final_text = f"⚠️ 순위 조회 중 오류가 발생했습니다.\n원인: {str(e)}"
+        final_ranking_text = f"⚠️ 순위 조회 중 시스템 오류가 발생했습니다.\n원인: {str(e)}"
 
     return jsonify({
         "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": final_text}}]}
+        "template": {"outputs": [{"simpleText": {"text": final_ranking_text}}]}
     })
 
-# 3. 등록한 마이팀 경기 일정 조회 API (선발투수 정보 완벽 파싱)
-@app.route("/show-match", methods=["POST"])
-def show_match():
-    req = request.get_json()
-    user_id = req.get("userRequest", {}).get("user", {}).get("id", "default_user")
-    
-    # 등록된 팀이 없다면 기본값 '삼성'으로 설정
-    my_team = USER_TEAMS.get(user_id, "삼성")
-    
-    # 2026년 오늘 날짜 기반으로 네이버 경기 일정 API 호출
-    url = "https://api-gw.sports.naver.com/kbaseball/schedule/today?gameDateTime=2026-06-19"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=3)
-        if response.status_code != 200:
-            raise Exception("네이버 일정 API 응답 실패")
-
-        data = response.json()
-        games = data.get("result", {}).get("todayGames", [])
-        
-        target_game = None
-        for game in games:
-            if my_team in game.get("homeTeamName", "") or my_team in game.get("awayTeamName", ""):
-                target_game = game
-                break
-
-        if not target_game:
-            return jsonify({
-                "version": "2.0",
-                "template": {"outputs": [{"simpleText": {"text": f"📅 오늘 [{my_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"}}]}
-            })
-
-        # 데이터 가공
-        date = target_game.get("gameDate", "2026-06-19")
-        time = target_game.get("gameTime", "18:30")
-        home = target_game.get("homeTeamName", "홈")
-        away = target_game.get("awayTeamName", "원정")
-        
-        # 선발 투수 정보 가져오기 (데이터가 없으면 '발표전' 처리)
-        home_pitcher = target_game.get("homeLeftPitcherName") or target_game.get("homePitcherName") or "선발투수 발표전"
-        away_pitcher = target_game.get("awayLeftPitcherName") or target_game.get("awayPitcherName") or "선발투수 발표전"
-
-        match_text = (
-            f"⭐ 내가 등록한 팀 [{my_team}] 경기 정보\n\n"
-            f"📅 날짜: {date}\n"
-            f"⏰ 시간: {time}\n"
-            f"⚾ {away}({away_pitcher}) vs {home}({home_pitcher})\n\n"
-            f"※ 네이버 실시간 데이터 동기화 완료"
-        )
-
-    except Exception as e:
-        match_text = f"⚠️ 경기 정보를 가져오지 못했습니다.\n원인: {str(e)}"
-
-    return jsonify({
-        "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": match_text}}]}
-    })
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
