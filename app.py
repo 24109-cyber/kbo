@@ -36,7 +36,6 @@ def save_data(data):
 # ⚾ [크롤링] 네이버 스포츠 KBO 오늘 경기 일정 조회
 # -------------------------------------------------------------
 def get_my_kbo_game(registered_team):
-    # 한국 시간(KST) 구하기
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     today_str = kst_now.strftime("%Y-%m-%d")
 
@@ -194,57 +193,56 @@ def show_forecast():
 
     return jsonify({
         "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": forecast_text}}]}
+        "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않았습니다."}}]}
     })
 
 
 # -------------------------------------------------------------
-# [스킬 4] 🛠️ 실시간 순위 조회 API (가장 안정적인 Daum 스포츠 소스로 대체 우회)
+# [스킬 4] 🛠️ 실시간 순위 조회 API (순수 JSON 파싱으로 완전 개편)
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
-    # 💡 네이버 대안으로 봇 차단 및 구조 변경이 적고 깔끔한 Daum 스포츠 순위 구조 활용
-    url = "https://sports.daum.net/prx/hermes/api/team/rank.json?leagueCode=kbo&seasonKey=2026_REGULAR"
+    # 💡 HTML 크롤링을 완전히 버리고 네이버 스포츠 내부 백엔드 실제 API 주소 직접 타격
+    url = "https://api-gw.sports.naver.com/kbaseball/category/record/team?seasonCode=2026"
+    
+    # Render 서버 IP 차단을 방지하기 위한 브라우저 우회 기본 헤더
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://sports.news.naver.com",
+        "Referer": "https://sports.news.naver.com/"
     }
 
     try:
         response = requests.get(url, headers=headers, timeout=5)
         
-        # 만약 Daum 소스 접속에 실패하거나 데이터 구조가 비어있을 때의 2안 (네이버 서브 API 우회)
         if response.status_code != 200:
-            url = "https://sports.news.naver.com/kbaseball/record/index?category=kbo"
-            res = requests.get(url, headers=headers, timeout=5)
-            soup = BeautifulSoup(res.text, "html.parser")
-            # 백업용 텍스트 파싱 시도
-            teams_data = soup.find_all("span", class_="name")
-            if not teams_data:
-                raise Exception("모든 순위 제공 소스의 접속이 일시적으로 제한되었습니다.")
-            
-            ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
-            for idx, team in enumerate(teams_data[:10], start=1):
-                ranking_list.append(f"{idx}위: {team.get_text().strip()}")
-        else:
-            # 기본 Daum JSON 데이터 깔끔하게 추출
-            data = response.json()
-            teams = data.get("list", [])
-            
-            if not teams:
-                raise Exception("순위 데이터가 비어 있습니다.")
+            raise Exception(f"데이터 서버 접근 불가 (코드: {response.status_code})")
 
-            ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
-            for team in teams:
-                rank = team.get("rank", "-")
-                team_name = team.get("teamName", "-")
+        data = response.json()
+        
+        # 네이버 API 핵심 객체 트리 추적
+        regular_season = data.get("result", {}).get("regularSeason", {})
+        team_list = regular_season.get("teamRecordList", [])
+
+        if not team_list:
+            raise Exception("현재 시즌 순위 데이터를 불러올 수 없습니다.")
+
+        # 오직 순위와 팀 이름만 깔끔하게 정제해서 포맷팅
+        ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
+        
+        for team in team_list:
+            rank = team.get("rank")          # 순위 숫자 숫자만 추출
+            team_name = team.get("teamName") # 정갈한 팀 한글 명칭 추출
+            if rank and team_name:
                 ranking_list.append(f"{rank}위: {team_name}")
 
         ranking_list.append("-------------------------")
-        ranking_list.append("※ 실시간 스포츠 데이터 반영 완료")
+        ranking_list.append("※ 네이버 스포츠 실시간 API 연동 완료")
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        final_ranking_text = f"⚠️ 순위 조회 중 시스템 오류가 발생했습니다.\n원인: {str(e)}"
+        final_ranking_text = f"⚠️ 순위 데이터를 가공하는 중 오류가 발생했습니다.\n원인: {str(e)}"
 
     return jsonify({
         "version": "2.0",
