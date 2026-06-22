@@ -2,7 +2,6 @@ import datetime
 import json
 import os
 import requests
-from bs4 import BeautifulSoup
 from flask import Flask, jsonify, request
 from openai import OpenAI
 
@@ -36,6 +35,7 @@ def save_data(data):
 # ⚾ [크롤링] 네이버 스포츠 KBO 오늘 경기 일정 조회
 # -------------------------------------------------------------
 def get_my_kbo_game(registered_team):
+    # 한국 시간(KST) 구하기
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     today_str = kst_now.strftime("%Y-%m-%d")
 
@@ -53,7 +53,7 @@ def get_my_kbo_game(registered_team):
         games = data.get("result", {}).get("games", [])
 
         if not games:
-            return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (휴식일)"
+            return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (내 팀 휴식일)"
 
         search_team = registered_team.replace(" ", "").strip()
 
@@ -82,7 +82,7 @@ def get_my_kbo_game(registered_team):
                 result_text += "※ 실시간 경기 데이터 반영"
                 return result_text
 
-        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다."
+        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
 
     except Exception as e:
         return f"경기 정보 로딩 중 에러 발생: {str(e)}"
@@ -121,7 +121,7 @@ def register_team():
         "template": {
             "outputs": [{
                 "simpleText": {
-                    "text": f"🎉 {selected_team} 등록 완료!\n앞으로 실시간 순위와 경기 정보를 안내해 드릴게요."
+                    "text": f"🎉 {selected_team} 등록 완료!\n실시간 순위와 매치 정보를 확인해보세요."
                 }
             }]
         },
@@ -172,7 +172,7 @@ def show_forecast():
     if not client:
         return jsonify({
             "version": "2.0",
-            "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않았습니다."}}]}
+            "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않아 화면 분석을 할 수 없습니다."}}]}
         })
 
     try:
@@ -193,19 +193,17 @@ def show_forecast():
 
     return jsonify({
         "version": "2.0",
-        "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않았습니다."}}]}
+        "template": {"outputs": [{"simpleText": {"text": forecast_text}}]}
     })
 
 
 # -------------------------------------------------------------
-# [스킬 4] 🛠️ 실시간 순위 조회 API (순수 JSON 파싱으로 완전 개편)
+# [스킬 4] 🛠️ 실시간 순위 조회 API (데이터 추출부 전면 교정)
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
-    # 💡 HTML 크롤링을 완전히 버리고 네이버 스포츠 내부 백엔드 실제 API 주소 직접 타격
+    # 데이터 소스는 가장 신뢰도 높은 원본 네이버 스킬 게이트웨이 호출
     url = "https://api-gw.sports.naver.com/kbaseball/category/record/team?seasonCode=2026"
-    
-    # Render 서버 IP 차단을 방지하기 위한 브라우저 우회 기본 헤더
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -215,34 +213,35 @@ def show_ranking():
 
     try:
         response = requests.get(url, headers=headers, timeout=5)
-        
         if response.status_code != 200:
-            raise Exception(f"데이터 서버 접근 불가 (코드: {response.status_code})")
+            raise Exception(f"서버 응답 오류 (코드: {response.status_code})")
 
         data = response.json()
         
-        # 네이버 API 핵심 객체 트리 추적
+        # 💡 [교정 핵심] 딕셔너리 객체 내부에 숨은 진짜 배열 데이터(teamRecordList)를 정확하게 가져옴
         regular_season = data.get("result", {}).get("regularSeason", {})
         team_list = regular_season.get("teamRecordList", [])
 
         if not team_list:
-            raise Exception("현재 시즌 순위 데이터를 불러올 수 없습니다.")
+            raise Exception("순위 리스트 형식을 파싱할 수 없습니다.")
 
-        # 오직 순위와 팀 이름만 깔끔하게 정제해서 포맷팅
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
         
-        for team in team_list:
-            rank = team.get("rank")          # 순위 숫자 숫자만 추출
-            team_name = team.get("teamName") # 정갈한 팀 한글 명칭 추출
-            if rank and team_name:
+        # 💡 각 딕셔너리 요소에서 'rank'와 'teamName' 필드만 매칭하여 깔끔한 문자열로 포맷
+        for idx, team in enumerate(team_list, start=1):
+            rank = team.get("rank", idx)            # 순위 정보 추출
+            team_name = team.get("teamName", "-")   # 팀 한글 명칭 추출
+            
+            # 승률이나 다른 세부 스탯 정보는 싹 걸러내고 순위와 팀명만 빌드
+            if team_name != "-":
                 ranking_list.append(f"{rank}위: {team_name}")
 
         ranking_list.append("-------------------------")
-        ranking_list.append("※ 네이버 스포츠 실시간 API 연동 완료")
+        ranking_list.append("※ 네이버 스포츠 실시간 데이터")
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
-        final_ranking_text = f"⚠️ 순위 데이터를 가공하는 중 오류가 발생했습니다.\n원인: {str(e)}"
+        final_ranking_text = f"⚠️ 순위 조회 중 오류가 발생했습니다.\n원인: {str(e)}"
 
     return jsonify({
         "version": "2.0",
