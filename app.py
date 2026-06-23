@@ -1,9 +1,7 @@
 import datetime
 import json
 import os
-import re
 import requests
-from bs4 import BeautifulSoup
 from flask import Flask, jsonify, request
 from openai import OpenAI
 
@@ -11,8 +9,8 @@ app = Flask(__name__)
 
 DB_FILE = "user_teams.json"
 
-# OpenAI 클라이언트 초기화 (환경 변수 체크)
-OPENAI_API_KEY = os.environ.get("OPEN_API_KEY", "")
+# 💡 Render에 등록한 'OPENAI_API_KEY'와 완벽하게 일치하도록 수정!
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 client = None
 if OPENAI_API_KEY:
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -37,7 +35,6 @@ def save_data(data):
 # ⚾ [크롤링] 네이버 스포츠 KBO 오늘 경기 일정 조회
 # -------------------------------------------------------------
 def get_my_kbo_game(registered_team):
-    # 한국 시간(KST) 구하기
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     today_str = kst_now.strftime("%Y-%m-%d")
 
@@ -49,13 +46,13 @@ def get_my_kbo_game(registered_team):
     try:
         response = requests.get(url, headers=headers, timeout=7)
         if response.status_code != 200:
-            return "경기 일정을 불러올 수 없습니다. (네이버 API 응답 실패)"
+            return "경기 일정을 불러올 수 없습니다. (데이터 서버 응답 실패)"
 
         data = response.json()
         games = data.get("result", {}).get("games", [])
 
         if not games:
-            return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (휴식일)"
+            return f"📅 [{today_str}] 오늘 예정된 KBO 경기가 없습니다. (내 팀 휴식일)"
 
         search_team = registered_team.replace(" ", "").strip()
 
@@ -81,17 +78,17 @@ def get_my_kbo_game(registered_team):
                 result_text += f"📅 날짜: {today_str}\n"
                 result_text += f"⏰ 시간: {game_time}\n"
                 result_text += f"⚾ {display_left} ({pitcher_left}) vs {display_right} ({pitcher_right})\n\n"
-                result_text += "※ 네이버 스포츠 실시간 데이터"
+                result_text += "※ 실시간 경기 데이터 반영"
                 return result_text
 
-        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다."
+        return f"📅 오늘 [{registered_team}]의 경기 일정은 없습니다. (내 팀 휴식일)"
 
     except Exception as e:
         return f"경기 정보 로딩 중 에러 발생: {str(e)}"
 
 
 # -------------------------------------------------------------
-# [스킬 1] 응원 팀 등록 (/register-team) -> 원본 구조 완벽 보존
+# [스킬 1] 응원 팀 등록 (/register-team)
 # -------------------------------------------------------------
 @app.route("/register-team", methods=["POST"])
 def register_team():
@@ -123,7 +120,7 @@ def register_team():
         "template": {
             "outputs": [{
                 "simpleText": {
-                    "text": f"🎉 {selected_team} 등록 완료!\n앞으로 실시간 순위와 경기 정보를 안내해 드릴게요."
+                    "text": f"🎉 {selected_team} 등록 완료!\n실시간 순위와 매치 정보를 확인해보세요."
                 }
             }]
         },
@@ -171,10 +168,11 @@ def show_forecast():
             "template": {"outputs": [{"simpleText": {"text": "아직 응원 팀이 등록되지 않았어요! 😅"}}]}
         })
 
+    # 💡 연결된 클라이언트 인스턴스 검증
     if not client:
         return jsonify({
             "version": "2.0",
-            "template": {"outputs": [{"simpleText": {"text": "⚠️ OpenAI API 키가 설정되지 않았습니다."}}]}
+            "template": {"outputs": [{"simpleText": {"text": f"⚠️ OpenAI API 키 인식에 실패했습니다. (현재 로드된 키: {OPENAI_API_KEY})"}}]}
         })
 
     try:
@@ -200,55 +198,59 @@ def show_forecast():
 
 
 # -------------------------------------------------------------
-# [스킬 4] 🛠️ 실시간 순위 조회 API (403 우회 및 태그 깨짐 방지 융합형)
+# [스킬 4] 🏆 실시간 순위 조회 API (오류 원천 교정 완료)
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
-    # 💡 403 차단이 전혀 없는 네이버 모바일 웹 페이지 경로 사용
-    url = "https://m.sports.naver.com/kbaseball/record/kbo?seasonCode=2026"
+    req = request.get_json()
+    try:
+        user_id = req["userRequest"]["user"]["id"]
+        selected_team = None
+        if "params" in req.get("action", {}) and "team" in req["action"]["params"]:
+            selected_team = req["action"]["params"]["team"]
+        elif "clientExtra" in req.get("action", {}) and "team" in req["action"]["clientExtra"]:
+            selected_team = req["action"]["clientExtra"]["team"]
+            
+        if not selected_team:
+            user_data = load_data()
+            selected_team = user_data.get(user_id)
+    except Exception:
+        selected_team = None
+
+    url = "https://api-gw.sports.naver.com/kbaseball/category/record/team?seasonCode=2026"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://sports.news.naver.com",
+        "Referer": "https://sports.news.naver.com/"
     }
 
     try:
         response = requests.get(url, headers=headers, timeout=5)
         if response.status_code != 200:
-            return jsonify({
-                "version": "2.0",
-                "template": {"outputs": [{"simpleText": {"text": f"⚠️ 네이버 페이지 접속 불가 (코드: {response.status_code})"}}]}
-            })
+            raise Exception(f"서버 응답 오류 (코드: {response.status_code})")
 
-        html_content = response.text
-        soup = BeautifulSoup(html_content, "html.parser")
+        data = response.json()
+        regular_season = data.get("result", {}).get("regularSeason", {})
+        team_list = regular_season.get("teamRecordList", [])
 
-        # 💡 [핵심] 클래스명 변경 대처: 태그 속성에 'TeamInfo_ranking'과 'team_name'이 포함되어 있는 모든 요소를 가져옴
-        rank_elements = soup.find_all(lambda tag: tag.name == "em" and any("TeamInfo_ranking" in cls for cls in tag.get("class", [])))
-        team_elements = soup.find_all(lambda tag: tag.name == "div" and any("TeamInfo_team_name" in cls for cls in tag.get("class", [])))
+        if not team_list:
+            raise Exception("순위 리스트 형식을 파싱할 수 없습니다.")
 
-        # 만약 클래스 파싱에 실패했을 경우를 위한 2차 방어선 (정규식 텍스트 스캔)
-        if not rank_elements or not team_elements:
-            # HTML 스크립트 소스 내 데이터 객체에서 팀 데이터 순서대로 강제 추출
-            found_teams = re.findall(r'"teamName"\s*:\s*"([^"]+)"', html_content)
-            if found_teams:
-                # 네이버 스크립트에서 중복 매칭되는 원본 데이터만 필터링 (KBO 팀 수 기준 상위 10개)
-                unique_teams = []
-                for t in found_teams:
-                    if t not in unique_teams:
-                        unique_teams.append(t)
-                final_teams = unique_teams[:10]
-            else:
-                raise Exception("순위 데이터를 텍스트 레벨에서 파싱하지 못했습니다.")
-        else:
-            final_teams = [team.get_text().strip() for team in team_elements[:10]]
-
-        # 출력 텍스트 빌드 (오직 순위와 팀명만 정갈하게 구성)
         ranking_list = ["🏆 2026 KBO 프로야구 실시간 순위", "-------------------------"]
         
-        for idx, team_name in enumerate(final_teams, start=1):
-            ranking_list.append(f"{idx}위: {team_name}")
+        for idx, team in enumerate(team_list, start=1):
+            rank = team.get("rank", idx)
+            team_name = team.get("teamName", "-")
+            
+            if team_name != "-":
+                if selected_team and (selected_team.replace(" ", "") in team_name.replace(" ", "")):
+                    ranking_list.append(f"⭐ {rank}위: {team_name} (내 팀)")
+                else:
+                    ranking_list.append(f"{rank}위: {team_name}")
 
         ranking_list.append("-------------------------")
-        ranking_list.append("※ 네이버 스포츠 실시간 반영 완료")
+        ranking_list.append("※ 네이버 스포츠 실시간 데이터")
         final_ranking_text = "\n".join(ranking_list)
 
     except Exception as e:
