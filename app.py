@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 DB_FILE = "user_teams.json"
 
-# 💡 Render에 등록한 'OPENAI_API_KEY'와 완벽하게 일치하도록 수정!
+# Render에 등록한 'OPENAI_API_KEY'와 완벽하게 일치하도록 수정
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 client = None
 if OPENAI_API_KEY:
@@ -32,7 +32,7 @@ def save_data(data):
 
 
 # -------------------------------------------------------------
-# ⚾ [크롤링] 네이버 스포츠 KBO 오늘 경기 일정 조회
+# ⚾ [크롤링] 네이버 스포츠 KBO 오늘 경기 일정 조회 (선발투수 삭제 완료)
 # -------------------------------------------------------------
 def get_my_kbo_game(registered_team):
     kst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
@@ -71,13 +71,11 @@ def get_my_kbo_game(registered_team):
                     else "18:30"
                 )
 
-                pitcher_left = game.get("awayPitcherName", "미정").strip()
-                pitcher_right = game.get("homePitcherName", "미정").strip()
-
+                # 💡 [수정 포인트] 투수 정보 변수와 괄호 포맷을 완전히 지우고 누구 vs 누구만 남김!
                 result_text = f"⭐ 내가 등록한 팀 [{registered_team}] 경기 정보\n\n"
                 result_text += f"📅 날짜: {today_str}\n"
                 result_text += f"⏰ 시간: {game_time}\n"
-                result_text += f"⚾ {display_left} ({pitcher_left}) vs {display_right} ({pitcher_right})\n\n"
+                result_text += f"⚾ {display_left} vs {display_right}\n\n"
                 result_text += "※ 실시간 경기 데이터 반영"
                 return result_text
 
@@ -168,7 +166,6 @@ def show_forecast():
             "template": {"outputs": [{"simpleText": {"text": "아직 응원 팀이 등록되지 않았어요! 😅"}}]}
         })
 
-    # 💡 연결된 클라이언트 인스턴스 검증
     if not client:
         return jsonify({
             "version": "2.0",
@@ -198,7 +195,7 @@ def show_forecast():
 
 
 # -------------------------------------------------------------
-# [스킬 4] 🏆 실시간 순위 조회 API (오류 원천 교정 완료)
+# [스킬 4] 🏆 실시간 순위 조회 API
 # -------------------------------------------------------------
 @app.route("/show-ranking", methods=["POST"])
 def show_ranking():
